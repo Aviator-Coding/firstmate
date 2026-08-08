@@ -1036,11 +1036,14 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, no exact busy verdict, no declared pause.
-          #     Surface immediately so firstmate inspects the inconclusive state
-          #     (it may be done via an interactive menu that wrote no done: status,
-          #     waiting on a decision, or wedged) instead of leaving the finish to
-          #     wait out the timer.
+          #   - none: no running pipeline, no exact busy verdict, and either no
+          #     declared pause at all or one whose live agent still owes its single
+          #     surface - pause_state_class owns that surface-once decision, and
+          #     surface_nonterminal_stale spends it on the durable marker rather
+          #     than on this hash. Surface immediately so firstmate inspects the
+          #     inconclusive state (it may be done via an interactive menu that
+          #     wrote no done: status, waiting on a decision, or wedged) instead of
+          #     leaving the finish to wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
