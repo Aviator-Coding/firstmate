@@ -786,6 +786,146 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# Run one watcher round against <state> for a live (or exited) declared-wait pane
+# and echo "exit" or "alive". Each round is a separate watcher process, exactly as
+# firstmate re-arms one after every actionable wake, so a wake that should have
+# been absorbed shows up as a round that exits.
+paused_cadence_round() {  # <state> <fakebin> <window> <capture-file> <out> <current-command> <crew-state> [extra env...]
+  local state=$1 fakebin=$2 window=$3 capture_file=$4 out=$5 cmd=$6 crew=$7 pid
+  shift 7
+  # env, not a bare assignment prefix: the caller's extra settings arrive as
+  # positional words, and a VAR=value word only counts as an assignment when the
+  # shell parsed it literally.
+  env PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND="$cmd" FM_FAKE_CREW_STATE="$crew" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" >> "$out" &
+  pid=$!
+  if wait_live "$pid" 60; then
+    reap "$pid"
+    printf 'alive\n'
+  else
+    wait "$pid" 2>/dev/null || true
+    printf 'exit\n'
+  fi
+}
+
+# Queued stale wakes for <window>; 0 when nothing ever queued (an absorbed run
+# never creates the queue at all).
+stale_wake_count() {  # <state> <window>
+  [ -e "$1/.wake-queue" ] || { printf '0\n'; return; }
+  awk -F '\t' -v w="$2" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$1/.wake-queue"
+}
+
+# Of those, the ones carrying the BARE "stale: <window>" reason - the immediate
+# surface, as opposed to the bounded declared-pause recheck.
+bare_stale_wake_count() {  # <state> <window>
+  [ -e "$1/.wake-queue" ] || { printf '0\n'; return; }
+  awk -F '\t' -v w="$2" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$1/.wake-queue"
+}
+
+# A LIVE crew that declared a wait must spend its single surface once per declared
+# WAIT, not once per pane hash. An idle pane still repaints (a clock, a token
+# counter, a redrawn footer), and every repaint used to read as a never-yet-seen
+# stale: the crew lost its pause cadence and the same declared wait surfaced again
+# a couple of polls later, continuously, so the supervisor could never rest.
+# The bounded recheck must still fire on its own long cadence, an exited agent
+# must still reach that cadence without spending a surface at all, and the
+# captain-held declaration must behave identically to the paused one.
+test_live_declared_pause_survives_pane_repaints() {
+  local dir state fakebin out capture_file statusf window key sig round result wakes bare
+  dir=$(make_case live-pause-repaint); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: awaiting a captain decision routed through firstmate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'awaiting the captain decision (idle 0)\n' > "$capture_file"
+  printf '%s' "$(hash_text 'awaiting the captain decision (idle 0)')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # The one allowed surface: a live agent may still be sitting at a real gate.
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$capture_file" "$out" grok \
+    'state: parked · source: run-step · awaiting_approval')
+  [ "$result" = exit ] || fail "a live declared pause never surfaced its one allowed stale wake"
+  [ "$(bare_stale_wake_count "$state" "$window")" -eq 1 ] \
+    || fail "a live declared pause did not surface exactly once on first sight"
+
+  # Every later round repaints the idle pane. The declared wait is unchanged, so
+  # none of these rounds may surface anything.
+  round=1
+  while [ "$round" -le 3 ]; do
+    printf 'awaiting the captain decision (idle %s)\n' "$round" > "$capture_file"
+    result=$(paused_cadence_round "$state" "$fakebin" "$window" "$capture_file" "$out" grok \
+      'state: parked · source: run-step · awaiting_approval' FM_PAUSE_RESURFACE_SECS=999)
+    [ "$result" = alive ] \
+      || fail "repaint round $round re-surfaced a live declared pause instead of absorbing it: $(cat "$out")"
+    round=$((round + 1))
+  done
+  wakes=$(stale_wake_count "$state" "$window")
+  [ "$wakes" -eq 1 ] \
+    || fail "a live declared pause flooded $wakes stale wakes across three idle-pane repaints"
+  [ -e "$state/.paused-$key" ] || fail "a live declared pause lost its bounded-cadence marker across repaints"
+
+  # Criterion: the bounded recheck itself still fires, so a forgotten wait cannot
+  # rot invisibly. Age both the declaration and the last re-surface past the window.
+  set_mtime $(( $(date +%s) - 500 )) "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  set_mtime $(( $(date +%s) - 500 )) "$state/.paused-resurfaced-$key"
+  printf 'awaiting the captain decision (idle final)\n' > "$capture_file"
+  : > "$out"
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$capture_file" "$out" grok \
+    'state: parked · source: run-step · awaiting_approval' FM_PAUSE_RESURFACE_SECS=240)
+  [ "$result" = exit ] || fail "a live declared pause never re-surfaced on its long recheck cadence"
+  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+    || fail "the long recheck did not carry the declared-pause reason"
+
+  # An exited agent stays distinct: it reaches the bounded cadence immediately,
+  # spending no surface at all, under the same repainting pane.
+  dir=$(make_case exited-pause-repaint); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: held while an external decision is pending\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  round=0
+  while [ "$round" -le 3 ]; do
+    printf 'idle bare shell after agent exit (%s)\n' "$round" > "$capture_file"
+    result=$(paused_cadence_round "$state" "$fakebin" "$window" "$capture_file" "$out" zsh \
+      'state: stopped · source: pane · bare shell' FM_PAUSE_RESURFACE_SECS=999)
+    [ "$result" = alive ] \
+      || fail "exited declared-pause repaint round $round surfaced instead of holding the bounded cadence: $(cat "$out")"
+    round=$((round + 1))
+  done
+  [ "$(bare_stale_wake_count "$state" "$window")" -eq 0 ] \
+    || fail "an exited declared pause spent a bare stale surface it should never spend"
+
+  # A captain-held transfer is the same declaration and gets the same cadence.
+  dir=$(make_case live-captain-held-repaint); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'captain-held [key=route]: tracked by held-decision-route\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  round=0
+  while [ "$round" -le 3 ]; do
+    printf 'idle after the captain-held transfer (%s)\n' "$round" > "$capture_file"
+    result=$(paused_cadence_round "$state" "$fakebin" "$window" "$capture_file" "$out" grok \
+      'state: parked · source: run-step · awaiting_approval' FM_PAUSE_RESURFACE_SECS=999)
+    if [ "$round" -eq 0 ]; then
+      [ "$result" = exit ] || fail "a live captain-held transfer never surfaced its one allowed stale wake"
+    else
+      [ "$result" = alive ] \
+        || fail "captain-held repaint round $round re-surfaced instead of absorbing it: $(cat "$out")"
+    fi
+    round=$((round + 1))
+  done
+  bare=$(bare_stale_wake_count "$state" "$window")
+  [ "$bare" -eq 1 ] \
+    || fail "a live captain-held transfer surfaced $bare stale wakes across four idle-pane repaints, expected exactly one"
+  pass "a live declared pause or captain hold keeps its bounded cadence across idle-pane repaints, still rechecks on the long cadence, and stays distinct from an exited agent"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1826,6 +1966,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_live_declared_pause_survives_pane_repaints
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

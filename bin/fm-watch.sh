@@ -154,7 +154,8 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
+# bounded cadence, while a live or ambiguously read agent surfaces once per
+# declared wait first (pause_state_class owns that surface-once decision).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -363,10 +364,21 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# A confidently dead ordinary crew keeps the bounded cadence from the first
+# sighting, because nothing is left that could still be waiting on a live
+# decision gate. A live or ambiguously read one may still be sitting at such a
+# gate, so it surfaces ONCE first - but that single surface is spent per declared
+# WAIT, tracked on the durable .paused-resurfaced marker, never per pane hash.
+# Anchoring it on the hash is what produced the continuous stale flood: any
+# repaint of an idle pane (a clock, a token counter, a redrawn footer) minted a
+# fresh hash, so the crew read as never-yet-surfaced again, dropped its pause
+# cadence, and re-surfaced the same declared wait every couple of polls. Once
+# that single surface is spent, every later recheck belongs to
+# handle_paused_stale's PAUSE_RESURFACE_SECS cadence - the one owner of the
+# bounded re-surface - so the wait still cannot rot invisibly, and it re-surfaces
+# with the declared-pause reason rather than a bare stale.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key last recheck_file class agent_alive ordinary=0
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -377,33 +389,40 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
+  # Cheap repeat path: the bounded cadence was established within the last
+  # STALE_ESCALATE_SECS, so trust it without re-reading crew state or the
+  # backend. Reaching here means an earlier poll already resolved liveness and
+  # the surface below, so nothing is being silenced that has not been reported.
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
     printf 'paused'
     return
   fi
+  # An actively-running pipeline outranks the declared wait, the same run-step
+  # precedence fm-crew-state itself applies, so this is decided before liveness.
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
     return
   fi
+  # Secondmate endpoints are supervised through their status writes - an idle
+  # secondmate agent pane is healthy by design - so their liveness never enters
+  # this decision, exactly as the stale loop excludes them elsewhere.
   if [ "$(window_kind "$win")" != secondmate ]; then
+    ordinary=1
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
+    if [ "$agent_alive" != dead ] && [ ! -e "$STATE/.paused-resurfaced-$key" ]; then
       rm -f "$recheck_file"
       printf 'none'
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  # fm-crew-state cannot confirm the declared wait itself: it has fallen back to
+  # stopped or unknown for an exited agent, or it authoritatively reports the
+  # gate the crew is parked at rather than the wait the crew declared over it.
+  # Reaching here means the surface above is either spent or not owed at all, so
+  # the declaration governs and the bounded cadence takes over.
+  [ "$ordinary" = 1 ] && [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
