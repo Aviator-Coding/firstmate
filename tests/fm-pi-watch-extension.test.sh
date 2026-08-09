@@ -891,9 +891,14 @@ test_pi_session_transition_generation_owner() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+# The pid file is this child's single readiness signal, so it is published last
+# and by rename: a plain redirect creates the file empty and fills it a moment
+# later, so an observer polling for existence can read "" and mistake a blank
+# pid for a live one, and the arm-log row it pairs with can still be missing.
 printf 'watcher: started pid=%s\n' "$$"
-printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
 printf 'arm pid=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}.staged"
+mv -f "${FM_CHILD_PID_FILE:?}.staged" "${FM_CHILD_PID_FILE:?}"
 trap 'exit 0' TERM INT
 while :; do sleep 0.2; done
 SH
@@ -919,9 +924,14 @@ function makePi() {
   return { pi, handlers, getTool: () => tool };
 }
 
+// Only a real pid can be alive: process.kill(0, 0) probes the calling process
+// group and answers "alive" for an empty or unparsed pid, which would
+// read a never-started or already-reaped child as a live one.
 function pidAlive(pid) {
+  const numeric = Number(pid);
+  if (!Number.isInteger(numeric) || numeric <= 0) return false;
   try {
-    process.kill(Number(pid), 0);
+    process.kill(numeric, 0);
     return true;
   } catch {
     return false;
@@ -960,7 +970,11 @@ const first = await startup.getTool().execute("startup", {}, undefined, undefine
 if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
   throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
 }
-await waitFor(() => existsSync(process.env.FM_CHILD_PID_FILE), "startup child");
+await waitFor(
+  () => existsSync(process.env.FM_CHILD_PID_FILE) &&
+    pidAlive(readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim()),
+  "startup child",
+);
 const startupChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
 if (!pidAlive(startupChild)) throw new Error("startup child was not alive");
 const staleTool = startup.getTool();
