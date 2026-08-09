@@ -78,6 +78,23 @@ build_remote_root() {
   git -C "$root" commit -qm 'remote job fixture'
 }
 
+# Wait up to <seconds> for a worker tree started from <remote-root>; echo its
+# supervisor pid when it appears. The start path only backgrounds the launch, so
+# the worker is still working through nohup and env when it returns and does not
+# carry its own command line until that exec chain finishes.
+wait_worker_pid() { # <remote-root> <seconds>
+  local root=$1 deadline=$(( $(date +%s) + $2 )) pid
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    pid=$(pgrep -f "^/bin/bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1)
+    if [ -n "$pid" ]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 # start_worker <remote-root> <account-home> <state-root>: start the worker
 # through the shared library start path and echo the supervisor pid.
 start_worker() {
@@ -89,7 +106,7 @@ start_worker() {
     # shellcheck source=bin/fm-remote-job-lib.sh
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_start_linux_worker "$root" "$account_home" >&2 || exit 1
-    pgrep -f "^/bin/bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1
+    wait_worker_pid "$root" 10
   ) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$pid"
