@@ -924,8 +924,8 @@ function makePi() {
   return { pi, handlers, getTool: () => tool };
 }
 
-// Only a real pid can be alive: process.kill(0, 0) probes the caller's own
-// process group and answers "alive" for an empty or unparsed pid, which would
+// Only a real pid can be alive: process.kill(0, 0) probes the calling process
+// group and answers "alive" for an empty or unparsed pid, which would
 // read a never-started or already-reaped child as a live one.
 function pidAlive(pid) {
   const numeric = Number(pid);
