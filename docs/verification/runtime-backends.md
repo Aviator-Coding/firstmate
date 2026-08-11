@@ -221,7 +221,7 @@ No ambient `herdr server stop` command is a supported test operation.
 ### Lab session routing
 
 Which session answers a call is decided entirely by the client, so it is checked against the installed binary rather than assumed.
-Checked on 2026-08-10 against Herdr 0.8.0 protocol 19.
+Checked on 2026-08-10 against Herdr 0.8.0 protocol 19, and on 2026-08-11 against the CI-pinned Herdr 0.7.4 protocol 16.
 
 Resolution order, highest first: a `--session` flag parsed before subcommand dispatch, then `HERDR_SOCKET_PATH`, then `HERDR_SESSION`, then the default session.
 Option parsing stops at a bare `--`, so a flag placed after the agent-argument separator does not route at all.
@@ -255,7 +255,8 @@ tests/fm-herdr-lab-isolation-e2e.test.sh
 ```
 
 Observed guarantee: a passthrough command carrying a bare `--` is answered by the lab session, while the same shape with the flag after the separator is answered by the ambient socket, proving the guard is not vacuous.
-That guard contacts no running server: it names a lab session and an ambient socket path that both do not exist, so the socket named in the client's own error is the evidence.
+That guard contacts no running server: it names a lab session that does not exist and an ambient socket path that is an empty file nothing listens on, and it reads where a call went by comparing whole answers from the installed client - the same passthrough command run once unrouted and once with a leading `--session` - rather than by matching any string the client prints.
+Comparing answers is what keeps one guard honest across releases: 0.7.4 reports an unreachable socket as a bare OS error while 0.8.x names the session it resolved, and `agent start`'s own options changed between those releases, so the guard takes the passthrough shape from the installed client's usage text and fails loudly if the two answers ever stop differing.
 
 ### Prune and respawn
 
