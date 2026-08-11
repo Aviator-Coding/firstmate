@@ -29,8 +29,8 @@ state=$FM_FAKE_HERDR_STATE
 default_socket=$(cat "$state/default-socket")
 
 # Resolve the answering session the way the real client does, verified against
-# herdr 0.8.0 (docs/verification/runtime-backends.md "Herdr lab session
-# routing"): a --session flag is parsed before subcommand dispatch and wins;
+# herdr 0.8.0 (docs/verification/runtime-backends.md "Lab session routing"): a
+# --session flag is parsed before subcommand dispatch and wins;
 # option parsing stops at a bare --, so a flag after it is agent passthrough and
 # never routes; with no flag, HERDR_SOCKET_PATH outranks HERDR_SESSION; with
 # neither, the default session answers.
@@ -49,6 +49,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 [ "${FM_FAKE_HERDR_IGNORE_SESSION_FLAG:-}" != 1 ] || flag_session=
+[ "${FM_FAKE_HERDR_IGNORE_SESSION_ENV:-}" != 1 ] || unset HERDR_SESSION
 
 if [ -n "$flag_session" ]; then
   session=$flag_session
@@ -117,6 +118,7 @@ run_with_fake() {
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_IGNORE_SESSION_FLAG="${FM_FAKE_HERDR_IGNORE_SESSION_FLAG:-}" \
+    FM_FAKE_HERDR_IGNORE_SESSION_ENV="${FM_FAKE_HERDR_IGNORE_SESSION_ENV:-}" \
     HERDR_SOCKET_PATH="$AMBIENT_SOCKET" \
     HERDR_SESSION=default \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
@@ -233,6 +235,24 @@ test_passthrough_cannot_reach_the_ambient_session() {
   pass "fm-herdr-lab: an agent-argument passthrough command cannot reach the ambient session"
 }
 
+test_leading_flag_alone_survives_the_passthrough_separator() {
+  local name="fm-lab-leading-flag-$$"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "leading-flag fixture provision failed"
+  : > "$FAKE_LOG"
+  # The flag is the primary isolation, so it has to hold on its own. Drop the
+  # HERDR_SESSION fallback - bin/backends/herdr.sh records that a real client
+  # does not reliably honor it once another server is bound - and only a flag
+  # placed ahead of the bare -- still routes the call.
+  FM_FAKE_HERDR_IGNORE_SESSION_ENV=1 \
+    run_with_fake fm_herdr_lab_cli "$name" agent start probe --kind claude --pane w1:p8 \
+    -- --model haiku >/dev/null \
+    || fail "an agent-argument passthrough command was rejected outright"
+  assert_every_call_reached_the_lab "$name" "a passthrough command without the session env fallback"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "leading-flag fixture teardown failed"
+  pass "fm-herdr-lab: the leading session flag alone survives the agent-argument separator"
+}
+
 test_isolation_survives_losing_the_session_flag() {
   local name="fm-lab-flagless-$$"
   : > "$FAKE_LOG"
@@ -329,6 +349,7 @@ SH
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_passthrough_cannot_reach_the_ambient_session
+test_leading_flag_alone_survives_the_passthrough_separator
 test_isolation_survives_losing_the_session_flag
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
