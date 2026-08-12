@@ -9,25 +9,60 @@ TMP_ROOT=$(fm_test_tmproot fm-herdr-lab)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 FAKE_STATE="$TMP_ROOT/herdr-state"
 FAKE_LOG="$TMP_ROOT/herdr.log"
+PROBE_LOG="$TMP_ROOT/herdr-probe.log"
 TRIPWIRES="$TMP_ROOT/tripwires"
 REAL_SLEEP=$(command -v sleep)
+TAB=$(printf '\t')
+# The socket every Herdr-managed pane exports, pointing at the session that
+# spawned it. For a crewmate that is the fleet's live default session, so every
+# helper call below is made under the exact ambient condition the lab has to
+# survive.
+AMBIENT_SOCKET='/home/test/.config/herdr/herdr.sock'
 mkdir -p "$FAKE_STATE"
-printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+printf '%s\n' "$AMBIENT_SOCKET" > "$FAKE_STATE/default-socket"
 : > "$FAKE_LOG"
 
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 set -eu
-printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
 state=$FM_FAKE_HERDR_STATE
-last=
-for arg in "$@"; do
-  previous=$last
-  last=$arg
-done
-[ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
-session=$last
 default_socket=$(cat "$state/default-socket")
+
+# Resolve the answering session the way the real client does, verified against
+# herdr 0.8.0 (docs/verification/runtime-backends.md "Lab session routing"): a
+# --session flag is parsed before subcommand dispatch and wins;
+# option parsing stops at a bare --, so a flag after it is agent passthrough and
+# never routes; with no flag, HERDR_SOCKET_PATH outranks HERDR_SESSION; with
+# neither, the default session answers.
+flag_session=
+args=()
+passthrough=0
+while [ "$#" -gt 0 ]; do
+  if [ "$passthrough" -eq 0 ]; then
+    case "$1" in
+      --) passthrough=1 ;;
+      --session) flag_session=${2:-}; shift 2; continue ;;
+      --session=*) flag_session=${1#--session=}; shift; continue ;;
+    esac
+  fi
+  args+=("$1")
+  shift
+done
+[ "${FM_FAKE_HERDR_IGNORE_SESSION_FLAG:-}" != 1 ] || flag_session=
+[ "${FM_FAKE_HERDR_IGNORE_SESSION_ENV:-}" != 1 ] || unset HERDR_SESSION
+
+if [ -n "$flag_session" ]; then
+  session=$flag_session
+elif [ -n "${HERDR_SOCKET_PATH:-}" ]; then
+  if [ "$HERDR_SOCKET_PATH" = "$default_socket" ]; then session=default; else session=ambient-unknown; fi
+elif [ -n "${HERDR_SESSION:-}" ]; then
+  session=$HERDR_SESSION
+else
+  session=default
+fi
+
+set -- "${args[@]+"${args[@]}"}"
+printf '%s\t%s\n' "$session" "$*" >> "$FM_FAKE_HERDR_LOG"
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
 
@@ -42,7 +77,7 @@ case "$1 ${2:-}" in
         '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
     fi
     ;;
-  "server --session")
+  "server ")
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
@@ -82,8 +117,35 @@ run_with_fake() {
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
+    FM_FAKE_HERDR_IGNORE_SESSION_FLAG="${FM_FAKE_HERDR_IGNORE_SESSION_FLAG:-}" \
+    FM_FAKE_HERDR_IGNORE_SESSION_ENV="${FM_FAKE_HERDR_IGNORE_SESSION_ENV:-}" \
+    HERDR_SOCKET_PATH="$AMBIENT_SOCKET" \
+    HERDR_SESSION=default \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
+}
+
+# Every logged call must have been answered by the lab session and nothing else.
+assert_every_call_reached_the_lab() { # <session> <what>
+  local name=$1 what=$2 resolved rest
+  while IFS="$TAB" read -r resolved rest; do
+    [ -n "$resolved" ] || continue
+    [ "$resolved" = "$name" ] \
+      || fail "$what reached session '$resolved' instead of the lab: $rest"
+  done < "$FAKE_LOG"
+  assert_absent "$FAKE_STATE/default" "$what mutated the ambient default session"
+}
+
+# Resolve one raw client call outside the helper, to characterise the client
+# itself rather than the helper's use of it.
+probe_resolved_session() { # <herdr arguments...>
+  : > "$PROBE_LOG"
+  PATH="$FAKEBIN:$PATH" \
+    FM_FAKE_HERDR_STATE="$FAKE_STATE" \
+    FM_FAKE_HERDR_LOG="$PROBE_LOG" \
+    HERDR_SOCKET_PATH="$AMBIENT_SOCKET" \
+    herdr "$@" >/dev/null 2>&1 || true
+  cut -d"$TAB" -f1 < "$PROBE_LOG"
 }
 
 test_refuses_unsafe_names() {
@@ -137,23 +199,73 @@ test_provision_run_and_guarded_teardown() {
   [ "$(cat "$FAKE_STATE/$name")" = deleted ] || fail "teardown did not delete the lab session"
   assert_absent "$TRIPWIRES/$name.fleet-state.json" "successful teardown left its tripwire behind"
 
-  while IFS= read -r line; do
-    case "$line" in
-      *"--session $name") : ;;
-      *) fail "Herdr call lacks a trailing lab session: $line" ;;
-    esac
-  done < "$FAKE_LOG"
+  assert_every_call_reached_the_lab "$name" "a lifecycle call"
   line_count=$(wc -l < "$FAKE_LOG" | tr -d ' ')
-  stop_line=$(grep -n "^session stop $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
-  delete_line=$(grep -n "^session delete $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
+  stop_line=$(grep -n "^$name${TAB}session stop $name --json$" "$FAKE_LOG" | cut -d: -f1)
+  delete_line=$(grep -n "^$name${TAB}session delete $name --json$" "$FAKE_LOG" | cut -d: -f1)
   if [ -z "$stop_line" ] || [ -z "$delete_line" ] || [ "$line_count" -le "$delete_line" ]; then
     fail "teardown did not emit explicit stop/delete followed by the after tripwire"
   fi
-  sed -n "$((stop_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
+  sed -n "$((stop_line - 1))p" "$FAKE_LOG" | grep -F "session list --json" >/dev/null \
     || fail "stop was not immediately preceded by a fresh refuse-default session list"
-  sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
+  sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json" >/dev/null \
     || fail "delete was not immediately preceded by a fresh refuse-default session list"
   pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
+}
+
+test_passthrough_cannot_reach_the_ambient_session() {
+  local name="fm-lab-passthrough-$$" resolved
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "passthrough fixture provision failed"
+
+  # Keep the regression from going quietly vacuous: the shape this helper used
+  # to build - isolating flag last, agent passthrough separator in the middle -
+  # really is answered by the ambient session, here as on herdr 0.8.0.
+  resolved=$(probe_resolved_session agent start probe --kind claude --pane w1:p8 \
+    -- --model haiku --session "$name")
+  [ "$resolved" = default ] \
+    || fail "fixture does not reproduce the passthrough leak (resolved '$resolved'); the assertion below would prove nothing"
+
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_cli "$name" agent start probe --kind claude --pane w1:p8 \
+    -- --model haiku >/dev/null || fail "an agent-argument passthrough command was rejected outright"
+  assert_every_call_reached_the_lab "$name" "an agent-argument passthrough command"
+
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "passthrough fixture teardown failed"
+  pass "fm-herdr-lab: an agent-argument passthrough command cannot reach the ambient session"
+}
+
+test_leading_flag_alone_survives_the_passthrough_separator() {
+  local name="fm-lab-leading-flag-$$"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "leading-flag fixture provision failed"
+  : > "$FAKE_LOG"
+  # The flag is the primary isolation, so it has to hold on its own. Drop the
+  # HERDR_SESSION fallback - bin/backends/herdr.sh records that a real client
+  # does not reliably honor it once another server is bound - and only a flag
+  # placed ahead of the bare -- still routes the call.
+  FM_FAKE_HERDR_IGNORE_SESSION_ENV=1 \
+    run_with_fake fm_herdr_lab_cli "$name" agent start probe --kind claude --pane w1:p8 \
+    -- --model haiku >/dev/null \
+    || fail "an agent-argument passthrough command was rejected outright"
+  assert_every_call_reached_the_lab "$name" "a passthrough command without the session env fallback"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "leading-flag fixture teardown failed"
+  pass "fm-herdr-lab: the leading session flag alone survives the agent-argument separator"
+}
+
+test_isolation_survives_losing_the_session_flag() {
+  local name="fm-lab-flagless-$$"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "flagless fixture provision failed"
+  : > "$FAKE_LOG"
+  # Defense in depth against a client that stops honoring the flag: the ambient
+  # socket path is what wins precedence, so the lab must not leave it in place.
+  FM_FAKE_HERDR_IGNORE_SESSION_FLAG=1 \
+    run_with_fake fm_herdr_lab_cli "$name" workspace list >/dev/null \
+    || fail "flagless run command failed"
+  assert_every_call_reached_the_lab "$name" "a command whose session flag was ignored"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "flagless fixture teardown failed"
+  pass "fm-herdr-lab: losing the session flag falls back into the lab, never the ambient session"
 }
 
 test_missing_tripwire_blocks_destruction() {
@@ -236,6 +348,9 @@ SH
 
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
+test_passthrough_cannot_reach_the_ambient_session
+test_leading_flag_alone_survives_the_passthrough_separator
+test_isolation_survives_losing_the_session_flag
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision

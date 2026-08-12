@@ -207,7 +207,7 @@ The CLI matrix was checked directly:
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
-| Explicit session routing | `herdr <verb> ... --session <name>` | Reached the named session even while another server was running. |
+| Explicit session routing | `herdr --session <name> <verb> ...` | Reached the named session even while another server was running; see "Lab session routing" for why the flag's position is load-bearing. |
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
@@ -217,6 +217,46 @@ The CLI matrix was checked directly:
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+### Lab session routing
+
+Which session answers a call is decided entirely by the client, so it is checked against the installed binary rather than assumed.
+Checked on 2026-08-10 against Herdr 0.8.0 protocol 19, and on 2026-08-11 against the CI-pinned Herdr 0.7.4 protocol 16.
+
+Resolution order, highest first: a `--session` flag parsed before subcommand dispatch, then `HERDR_SOCKET_PATH`, then `HERDR_SESSION`, then the default session.
+Option parsing stops at a bare `--`, so a flag placed after the agent-argument separator does not route at all.
+Both facts matter together: Herdr exports `HERDR_SOCKET_PATH` into every pane it manages, pointing at the session that spawned it, so an unrouted call from a managed pane is answered by that pane's own session rather than refused.
+
+```sh
+HERDR_SOCKET_PATH=~/.config/herdr/herdr.sock \
+  herdr --session fm-lab-probe-nonexistent status server
+```
+
+```text
+status: not running
+socket: ~/.config/herdr/sessions/fm-lab-probe-nonexistent/herdr.sock
+```
+
+```sh
+env -u HERDR_SOCKET_PATH HERDR_SESSION=fm-lab-probe-nonexistent herdr status server
+```
+
+```text
+status: not running
+socket: ~/.config/herdr/sessions/fm-lab-probe-nonexistent/herdr.sock
+```
+
+The same read with `HERDR_SOCKET_PATH` left in place and no flag reported the ambient socket instead, which is what makes the socket variable, not the session variable, the one the lab helper has to clear.
+
+`bin/fm-herdr-lab.sh` therefore places `--session` ahead of the caller's command and clears the ambient socket path, and the guarantee is refreshed by:
+
+```sh
+tests/fm-herdr-lab-isolation-e2e.test.sh
+```
+
+Observed guarantee: a passthrough command carrying a bare `--` is answered by the lab session, while the same shape with the flag after the separator is answered by the ambient socket, proving the guard is not vacuous.
+That guard contacts no running server: it names a lab session that does not exist and an ambient socket path that is an empty file nothing listens on, and it reads where a call went by comparing whole answers from the installed client - the same passthrough command run once unrouted and once with a leading `--session` - rather than by matching any string the client prints.
+Comparing answers is what keeps one guard honest across releases: 0.7.4 reports an unreachable socket as a bare OS error while 0.8.x names the session it resolved, and `agent start`'s own options changed between those releases, so the guard takes the passthrough shape from the installed client's usage text and fails loudly if the two answers ever stop differing.
 
 ### Prune and respawn
 
