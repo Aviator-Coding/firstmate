@@ -533,6 +533,23 @@ ok - forced secondmate teardown retains Herdr child identity until exact pane di
 ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
 ```
 
+The same teardown fixture was re-run on 2026-08-13 after moving every refusable Herdr close and the post-close presence gate ahead of branch delete and treehouse return, and after adding the cross-task worktree claim refusal.
+
+```sh
+tests/fm-teardown.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
+```
+
+Observed output:
+
+```text
+ok - herdr projection teardown retains every record when post-close presence is unknown
+ok - herdr projection teardown refuses an active-tab close before returning the isolated copy
+ok - teardown refuses when another task already records the same isolated copy
+```
+
+Observed guarantees: an active-tab projected close and an unknown post-close presence both refuse while the isolated copy, the task branch, and `worktree=` remain intact and treehouse is not invoked; two task records naming the same worktree refuse teardown of either one without touching the directory, including under `--force`.
+
 ### Composer and operational input
 
 Real captures verified these active distinctions:

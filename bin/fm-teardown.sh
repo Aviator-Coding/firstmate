@@ -45,6 +45,14 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
+# A Herdr close can still refuse after that lock is held (active tab, unknown
+# presence). Worktree return is irreversible, so every refusable Herdr close
+# and the post-close presence gate run BEFORE branch delete or treehouse
+# return. On a later failure after a successful return, teardown clears only
+# the released worktree= pointer and keeps the rest of the retained record.
+# Before any worktree mutation, teardown also refuses when another task's
+# meta already records the same worktree path, including after a prior
+# partial cleanup left a stale pointer at a slot the pool has reused.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, locks each
@@ -183,6 +191,7 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+WORKTREE_RELEASED=0
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -192,6 +201,10 @@ teardown_release_locks() {
     fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
   done
   DESCENDANT_LOCK_PATHS=()
+  if [ "$status" -ne 0 ] && [ "$WORKTREE_RELEASED" = 1 ] \
+     && [ -n "${META:-}" ] && [ -f "$META" ]; then
+    teardown_clear_released_worktree_pointer "$META" "${WT:-}" || true
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -2147,6 +2160,110 @@ $session	$lock_path"
   return 1
 }
 
+teardown_worktree_paths_match() {  # <path-a> <path-b>
+  local a=$1 b=$2 a_real b_real
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  [ "$a" = "$b" ] && return 0
+  [ -d "$a" ] && [ -d "$b" ] || return 1
+  a_real=$(CDPATH='' cd -- "$a" 2>/dev/null && pwd -P) || return 1
+  b_real=$(CDPATH='' cd -- "$b" 2>/dev/null && pwd -P) || return 1
+  [ -n "$a_real" ] && [ "$a_real" = "$b_real" ]
+}
+
+# Refuse before any worktree mutation when another task already records this
+# isolated copy. --force does not override this: discard authority is for this
+# task's own work, not another live task's branch.
+teardown_refuse_if_worktree_claimed_elsewhere() {
+  local meta other other_wt
+  [ -n "$WT" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other=$(basename "$meta" .meta)
+    [ "$other" != "$ID" ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    if teardown_worktree_paths_match "$WT" "$other_wt"; then
+      echo "REFUSED: worktree $WT is also recorded for task $other; nothing was changed" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+teardown_clear_released_worktree_pointer() {  # <meta> <worktree>
+  local meta=$1 wt=$2 tmp
+  [ -f "$meta" ] && [ -n "$wt" ] || return 0
+  grep -q '^worktree=' "$meta" || return 0
+  tmp="$meta.tmp.$$"
+  grep -v '^worktree=' "$meta" > "$tmp" || true
+  printf '%s\n' "# worktree pointer cleared after return of $wt; a later teardown step refused" >> "$tmp"
+  mv -f -- "$tmp" "$meta"
+  echo "teardown: cleared worktree= for $ID after returning $wt because a later step refused; the isolated copy is no longer this task's" >&2
+}
+
+teardown_herdr_close_and_confirm() {
+  local journal retire_candidate=0 session pane journal_session journal_workspace journal_pane
+  journal="$STATE/$ID.herdr-presentation"
+  session=$TEARDOWN_HERDR_SESSION
+  pane=$TEARDOWN_HERDR_PANE
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fm_backend_source herdr || true
+    journal_session=$(meta_value "$META" herdr_session)
+    journal_workspace=$(meta_value "$META" herdr_workspace_id)
+    journal_pane=$(meta_value "$META" herdr_pane_id)
+    if [ -n "$journal_session" ] \
+       && [ -n "$journal_workspace" ] \
+       && [ -n "$journal_pane" ] \
+       && [ "$T" = "$journal_session:$journal_pane" ] \
+       && fm_backend_herdr_projection_endpoint_matches_journal \
+         "$journal_session" "$journal_workspace" \
+         "$journal" "$ID"; then
+      retire_candidate=1
+      session=$journal_session
+      pane=$journal_pane
+    fi
+  fi
+  if [ "$retire_candidate" = 1 ]; then
+    if teardown_herdr_session_lock_held "$session"; then
+      # stderr is deliberately NOT discarded here. This is the highest-frequency
+      # projected-close call site, and the helper's only stderr output is a real
+      # warning - unverifiable workspace.move support, a refused focus-unsafe
+      # close, an unconfirmed repositioned-workspace removal, or a failed exact
+      # restore.
+      # Swallowing them left a wrong active workspace with no operator-visible
+      # signal at all. The close stays non-fatal exactly as before: the presence
+      # gate below is what decides whether any durable record may be removed.
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$session" "$pane" || true
+    else
+      echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
+    fi
+  elif teardown_herdr_session_lock_held "$session"; then
+    fm_backend_herdr_kill_serialized "$session" "$pane" 2>/dev/null || true
+  else
+    echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
+  fi
+  if [ "$retire_candidate" = 1 ]; then
+    if [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = dead ]; then
+      rm -f "$journal"
+    else
+      echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
+    fi
+  elif [ -e "$journal" ] || [ -L "$journal" ]; then
+    echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+  fi
+  fm_backend_source herdr || true
+  if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
+    echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+    echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
+    return 1
+  fi
+  return 0
+}
+
 preflight_firstmate_home_herdr_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
   sub_state="$home/state"
@@ -2347,6 +2464,8 @@ if [ "$FORCE" != "--force" ] \
   fi
 fi
 
+teardown_refuse_if_worktree_claimed_elsewhere || exit 1
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -2372,9 +2491,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
+# them), and a shared-worktree claim has already been refused. Fix 1 and
+# Fix 2 (see script header) run here, unconditionally on --force, and before
+# branch delete or worktree return - a still-parked run or a leaked process
+# can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
@@ -2388,12 +2508,14 @@ fi
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (worktree return, pane close, record removal)
+# destructive sequence below (pane close, worktree return, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is
 # returned or erased: a contended lock refuses here while the isolated copy,
 # every durable record, and the endpoint are all still intact for a plain
 # rerun. An unresolvable lock path (for example an unreachable server) also
-# refuses before any destructive step.
+# refuses before any destructive step. The close itself can still refuse
+# (captain's active tab, unknown presence), so it runs before branch delete
+# or worktree return.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
 if [ "$BACKEND" = herdr ]; then
@@ -2401,6 +2523,7 @@ if [ "$BACKEND" = herdr ]; then
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+  teardown_herdr_close_and_confirm || exit 1
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
@@ -2444,81 +2567,11 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  WORKTREE_RELEASED=1
 fi
 
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
-fi
-
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  # The presentation lock was acquired before the worktree return above; a
-  # contended lock already refused this teardown while everything was intact.
-  if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
-    # stderr is deliberately NOT discarded here. This is the highest-frequency
-    # projected-close call site, and the helper's only stderr output is a real
-    # warning - unverifiable workspace.move support, a refused focus-unsafe
-    # close, an unconfirmed repositioned-workspace removal, or a failed exact
-    # restore.
-    # Swallowing them left a wrong active workspace with no operator-visible
-    # signal at all. The close stays non-fatal exactly as before: the presence
-    # gate below is what decides whether any durable record may be removed.
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
-  else
-    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
-  fi
-elif [ "$BACKEND" = herdr ]; then
-  if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
-    fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
-  else
-    echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
-  fi
-elif [ "$BACKEND" != orca ]; then
+if [ "$BACKEND" != orca ] && [ "$BACKEND" != herdr ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-fi
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  else
-    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
-  fi
-elif [ "$BACKEND" = herdr ] \
-     && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
-fi
-# A refused, skipped, or failed Herdr close must never erase a live task's
-# durable endpoint identity: unless the exact pane is confirmed gone, retain
-# every record and stop before any removal below so a later rerun can retry
-# the locked close. Only a structured not-found proves the pane gone; unknown
-# presence, missing or malformed endpoint identity, and missing confirmation
-# machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
-  fm_backend_source herdr || true
-  if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
-    echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
-    exit 1
-  fi
-  if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
-    echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
-    exit 1
-  fi
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
