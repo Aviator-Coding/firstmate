@@ -21,6 +21,9 @@
 #      message crosses the stubbed ssh transport while the close is the same
 #      local ledger append; a failed transport closes nothing.
 #   7. Flag misuse (--key, empty message, explicit backend target) refuses.
+#   8. A worker-written key sitting after the colon or at end of line is the
+#      same key the drain lists and --resolve-key accepts, while a line with no
+#      token stays "default" and still refuses a leftover slug.
 set -u
 
 # shellcheck source=tests/lib.sh
