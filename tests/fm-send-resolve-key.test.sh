@@ -21,6 +21,9 @@
 #      message crosses the stubbed ssh transport while the close is the same
 #      local ledger append; a failed transport closes nothing.
 #   7. Flag misuse (--key, empty message, explicit backend target) refuses.
+#   8. A worker-written key sitting after the colon or at end of line is the
+#      same key the drain lists and --resolve-key accepts, while a line with no
+#      token stays "default" and still refuses a leftover slug.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -404,4 +407,53 @@ test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_transport_failure_does_not_close
+# Worker-written needs-decision: [key=slug] ... (key after the colon, or at
+# end of line) must be the same open key the drain lists, so --resolve-key
+# slug succeeds instead of refusing a key the operator just saw.
+test_loose_form_key_matches_drain_and_resolves() {
+  local dir fb log home rc out err
+  dir="$TMP_ROOT/loose-form"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home loose-form)
+  fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
+  printf 'needs-decision: review gate 3 ask-user findings [key=review-ask-user]\n' > "$home/state/t8.status"
+  printf 'working: kept busy on an unrelated stream\n' >> "$home/state/t8.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F 't8 [key=review-ask-user]' >/dev/null \
+    || fail "precondition: drain should list the end-of-line key as the folded key: $out"
+  if printf '%s' "$out" | grep -F 't8 [key=default]' >/dev/null; then
+    fail "drain listed the end-of-line key as default: $out"
+  fi
+
+  run_send "$fb" "$home" "$log" t8 --resolve-key review-ask-user "accept the findings"; rc=$?
+  expect_code 0 "$rc" " --resolve-key should accept the folded key drain just printed"
+  grep -F 'resolved [key=review-ask-user]: answered: accept the findings' "$home/state/t8.status" >/dev/null \
+    || fail "fm-send did not close the loose-form key:"$'\n'"$(cat "$home/state/t8.status")"
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the loose-form decision still lists as open after --resolve-key: $out"
+  fi
+
+  fm_write_meta "$home/state/t9.meta" "window=sess:fm-t9" "kind=ship"
+  printf 'needs-decision: [key=after] pick REST or RPC\n' > "$home/state/t9.status"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F 't9 [key=after]' >/dev/null \
+    || fail "precondition: drain should list the post-colon key as the folded key: $out"
+  run_send "$fb" "$home" "$log" t9 --resolve-key after "go with REST"; rc=$?
+  expect_code 0 "$rc" " --resolve-key should accept a key sitting immediately after the colon"
+
+  printf 'needs-decision: no token at all\n' > "$home/state/t9.status"
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t9 --resolve-key after "stale slug" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unkeyed default decision should refuse a leftover slug"
+  assert_contains "$(cat "$err")" "--resolve-key 'after'" "the unkeyed refusal should name the leftover slug"
+  [ ! -s "$log" ] || fail "a refused leftover slug still typed text: $(cat "$log")"
+  pass "fm-send --resolve-key: post-colon and end-of-line keys match the drain and resolve"
+}
+
 test_flag_misuse_refuses
+test_loose_form_key_matches_drain_and_resolves

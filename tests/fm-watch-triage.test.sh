@@ -191,14 +191,68 @@ test_classifier_primitives() {
     && fail "FM_CAPTAIN_RE override bypassed paused: suppression"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" \
     || fail "nonterminal suppression weakened custom bare-line behavior"
-  printf 'needs-decision: should docs mention [key=prose]?\nneeds-decision [key=q1]: real choice\nresolved: docs still mention [key=q1]\nneeds-decision [key=bad key]: malformed\n' > "$state/keys.status"
+  # Key-position compatibility: a [key=slug] token anywhere on the line is the
+  # fold key. Workers write needs-decision: [key=slug] after the colon, and the
+  # 2026-08-14 form puts the token at end of line after other colons. Both must
+  # fold as that slug, not default. A line with no token still folds as default,
+  # and an unkeyed resolved: still closes default only.
+  printf '%s\n' \
+    'needs-decision [key=before]: pick REST or RPC' \
+    'needs-decision: [key=after] pick REST or RPC' \
+    'needs-decision: review gate 3 ask-user findings [key=review-ask-user]' \
+    'needs-decision: option A: ship now vs later [key=ship-timing]' \
+    'needs-decision: no token at all' \
+    'needs-decision [key=keep]: still open after default close' \
+    'resolved: closed the unkeyed default only' \
+    > "$state/keys.status"
   open=$(status_open_decisions "$state/keys.status")
-  printf '%s' "$open" | grep -F $'q1\t' >/dev/null \
-    || fail "a key token in resolved note prose closed the keyed decision"
-  printf '%s' "$open" | grep -F $'prose\t' >/dev/null \
-    && fail "a key token in note prose changed the decision key"
+  printf '%s' "$open" | grep -F $'before\t' >/dev/null \
+    || fail "a key token before the colon was not the folded key"
+  printf '%s' "$open" | grep -F $'after\t' >/dev/null \
+    || fail "a key token immediately after the colon folded as default instead of the slug"
+  printf '%s' "$open" | grep -F $'review-ask-user\t' >/dev/null \
+    || fail "a key token at end of line folded as default instead of the slug"
+  printf '%s' "$open" | grep -F $'ship-timing\t' >/dev/null \
+    || fail "a key token after another colon in the note was not the folded key"
+  printf '%s' "$open" | grep -F $'keep\t' >/dev/null \
+    || fail "an unkeyed resolved: closed a keyed decision instead of default only"
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    && fail "an unkeyed resolved: did not close the default decision"
+  printf '%s\n' \
+    'needs-decision: [key=loose-close] choose' \
+    'resolved: [key=loose-close] went with A' \
+    > "$state/loose-close.status"
+  [ -z "$(status_open_decisions "$state/loose-close.status")" ] \
+    || fail "a resolved line with the key after the colon did not close that key"
+  # A malformed slug never enters the set, but an OPENING verb still surfaces
+  # under default: silently swallowing an escalation is worse than the loud
+  # refusal this fold set out to fix.
+  printf '%s\n' \
+    'needs-decision: should the brief still require [key=<slug>]?' \
+    > "$state/malformed-open.status"
+  open=$(status_open_decisions "$state/malformed-open.status")
+  printf '%s' "$open" | grep -F $'<slug>\t' >/dev/null \
+    && fail "an invalid key slug entered the open-decision set"
+  printf '%s' "$open" | grep -F $'default\tneeds-decision\t' >/dev/null \
+    || fail "a needs-decision with a malformed key token was dropped instead of surfacing under default"
+  printf '%s\n' 'blocked [key=bad key]: malformed blocker' > "$state/malformed-block.status"
+  open=$(status_open_decisions "$state/malformed-block.status")
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
+  printf '%s' "$open" | grep -F $'default\tblocked\t' >/dev/null \
+    || fail "a blocked line with a malformed key token was dropped instead of surfacing under default"
+  # A CLOSING verb keeps the drop, so a malformed key can never close anything.
+  printf '%s\n' \
+    'needs-decision: plain unkeyed escalation' \
+    'needs-decision [key=keeper]: keyed escalation' \
+    'resolved [key=bad key]: malformed close before the colon' \
+    'resolved: [key=also bad] malformed close after the colon' \
+    > "$state/malformed-close.status"
+  open=$(status_open_decisions "$state/malformed-close.status")
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    || fail "a resolved line with a malformed key token closed the default decision"
+  printf '%s' "$open" | grep -F $'keeper\t' >/dev/null \
+    || fail "a resolved line with a malformed key token closed a keyed decision"
   cat > "$state/activity.status" <<'EOF'
 working [key=phase7]: Phase 7 started
 working [key=phase6]: Phase 6 started
@@ -221,6 +275,21 @@ EOF
   printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
+  # The decision fold's whole-line key scan must NOT reach phases: a key named
+  # only in a note would open a phase that the phase's own unkeyed terminal
+  # line can never close, and an open phase is read as supersession evidence.
+  printf '%s\n' \
+    'working: implementing the [key=api-shape] decision' \
+    'done: shipped' \
+    > "$state/prose-key-activity.status"
+  [ -z "$(status_open_activities "$state/prose-key-activity.status")" ] \
+    || fail "a key named only in an activity note left a phase open forever"
+  printf '%s\n' \
+    'working [key=phase9]: rolling out the [key=api-shape] decision' \
+    'done [key=phase9]: rolled out' \
+    > "$state/prefix-key-activity.status"
+  [ -z "$(status_open_activities "$state/prefix-key-activity.status")" ] \
+    || fail "an activity note key outranked the phase's own prefix key"
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 

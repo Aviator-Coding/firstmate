@@ -43,6 +43,9 @@ assert_watcher_liveness() {
 # fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
+# Each item prints the folded ledger key (including default) before the raw
+# note, so the key offered to --resolve-key is the key the ledger actually
+# holds, even when the raw status text also contains a [key=...] token.
 print_open_decisions_section() {
   local open task key verb note line item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
@@ -52,9 +55,7 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    line="$task [key=$key] $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
