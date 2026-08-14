@@ -73,24 +73,73 @@ case "${FM_FAKE_GROK_MODE:-authenticated}" in
     printf '\n%s\n' 'You are logged in with grok.com.'
     ;;
   empty) : ;;
-  hang) sleep 30 ;;
+  hang)
+    # Markers, not wall-clock: a bound that fires writes started and never
+    # finished; an unbounded hang writes both after the safety sleep.
+    if [ -n "${FM_FAKE_GROK_HANG_LOG:-}" ]; then
+      printf 'started\n' >> "$FM_FAKE_GROK_HANG_LOG"
+    fi
+    sleep 60
+    if [ -n "${FM_FAKE_GROK_HANG_LOG:-}" ]; then
+      printf 'finished\n' >> "$FM_FAKE_GROK_HANG_LOG"
+    fi
+    ;;
 esac
 # grok 0.2.117 exits 0 whether or not the session authenticates; the fake keeps
 # that property so a regression to exit-status reading fails here.
 exit 0
 SH
   chmod +x "$fakebin/grok"
+
+  # Optional recorder used by the zero-bound test. Putting `timeout` first on
+  # PATH makes fm-timeout-lib choose it, so the test can observe the duration
+  # operand the probe requested instead of waiting for the default 20s bound
+  # and comparing wall-clock elapsed time (which measures machine load).
+  if [ -n "${RECORD_TIMEOUT_LOG:-}" ]; then
+    cat > "$fakebin/timeout" <<SH
+#!/usr/bin/env bash
+log='${RECORD_TIMEOUT_LOG}'
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -k)
+      shift
+      [ \$# -gt 0 ] && shift
+      ;;
+    -k*) shift ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+seconds=\${1-}
+shift || true
+printf '%s\\n' "\$seconds" >> "\$log"
+case "\$seconds" in
+  ''|*[!0-9]*|0)
+    [ \$# -gt 0 ] && exec "\$@"
+    exit 0
+    ;;
+  *)
+    exit 124
+    ;;
+esac
+SH
+    chmod +x "$fakebin/timeout"
+  fi
   printf '%s\n' "$fakebin"
 }
 
 # run_probe <case> [args...] -- [env assignments...]
-# Sets RUN_LINE, RUN_RC, RUN_GROK_LOG, RUN_GROK_STDIN, RUN_QUOTA_LOG in the
-# caller's shell, so it must not be invoked in a command substitution.
+# Sets RUN_LINE, RUN_RC, RUN_GROK_LOG, RUN_GROK_STDIN, RUN_GROK_HANG,
+# RUN_QUOTA_LOG in the caller's shell, so it must not be invoked in a
+# command substitution.
 RUN_LINE=
 RUN_RC=0
 RUN_GROK_LOG=
 RUN_GROK_STDIN=
+RUN_GROK_HANG=
 RUN_QUOTA_LOG=
+RECORD_TIMEOUT_LOG=
 run_probe() {
   local case_name=$1
   shift
@@ -101,9 +150,11 @@ run_probe() {
   fakebin=$(make_fakebin "$case_dir")
   RUN_GROK_LOG="$case_dir/grok.log"
   RUN_GROK_STDIN="$case_dir/grok.stdin"
+  RUN_GROK_HANG="$case_dir/grok.hang"
   RUN_QUOTA_LOG="$case_dir/quota.log"
   : > "$RUN_GROK_LOG"
   : > "$RUN_GROK_STDIN"
+  : > "$RUN_GROK_HANG"
   : > "$RUN_QUOTA_LOG"
   local seen_separator=0
   for arg in "$@"; do
@@ -120,6 +171,7 @@ run_probe() {
   out=$(env "PATH=$fakebin:$BASE_PATH" \
     "FM_FAKE_GROK_LOG=$RUN_GROK_LOG" \
     "FM_FAKE_GROK_STDIN=$RUN_GROK_STDIN" \
+    "FM_FAKE_GROK_HANG_LOG=$RUN_GROK_HANG" \
     "FM_FAKE_QUOTA_LOG=$RUN_QUOTA_LOG" \
     "${env_pairs[@]+"${env_pairs[@]}"}" \
     "$SCRIPT" "${script_args[@]+"${script_args[@]}"}" \
@@ -159,6 +211,28 @@ assert_grok_never_ran() {  # <label>
 assert_quota_never_read() {  # <label>
   [ ! -s "$RUN_QUOTA_LOG" ] \
     || fail "$1: the probe must never call quota-axi, but it ran: $(tr '\n' '|' < "$RUN_QUOTA_LOG")"
+}
+
+# A hit bound interrupts the hang, so the safety sleep never writes finished.
+# Ordering, not elapsed wall-clock: a loaded machine can stretch a 20s bound
+# past any fixed ceiling without changing whether the hang completed.
+assert_hang_interrupted() {  # <label>
+  grep -qx started "$RUN_GROK_HANG" \
+    || fail "$1: hanging vendor CLI never started"$'\n'"--- hang log ---"$'\n'"$(cat "$RUN_GROK_HANG" 2>/dev/null)"
+  if grep -qx finished "$RUN_GROK_HANG"; then
+    fail "$1: hanging vendor CLI ran to completion; the bound did not interrupt it"
+  fi
+}
+
+assert_applied_bound() {  # <expected-seconds> <label>
+  local got
+  [ -s "$RECORD_TIMEOUT_LOG" ] \
+    || fail "$2: the bounding command was never invoked"
+  while IFS= read -r got; do
+    [ -n "$got" ] || continue
+    [ "$got" = "$1" ] \
+      || fail "$2: expected bound $1, the bounding command was invoked with $got"
+  done < "$RECORD_TIMEOUT_LOG"
 }
 
 # --- the retired dispatch coupling ------------------------------------------
@@ -282,30 +356,28 @@ test_missing_vendor_cli_is_reported_not_assumed() {
 # --- the bounded, non-destructive envelope ----------------------------------
 
 test_hanging_probe_is_bounded_and_reported() {
-  local started finished
-  started=$(date +%s)
   run_probe grok-hang grok -- "FM_FAKE_GROK_MODE=hang" "FM_VENDOR_AUTH_PROBE_TIMEOUT=2"
-  finished=$(date +%s)
   assert_field "$RUN_LINE" status timeout "a hit bound must be reported as a timeout"
-  [ $((finished - started)) -lt 25 ] \
-    || fail "the probe was not bounded: took $((finished - started))s against a 2s bound"
+  assert_hang_interrupted "a 2s bound"
   pass "a hanging vendor CLI is hard-bounded, reported, and cannot wedge an intake"
 }
 
 # `timeout 0` and the Perl fallback's `alarm 0` both mean "no deadline", so a
-# zero bound passed through would silently remove the hard bound entirely. The
-# fake hangs for 30s, longer than the 20s default it must fall back to, so the
-# two outcomes are distinguishable.
+# zero bound passed through would silently remove the hard bound entirely.
+# The test records the duration operand the probe passed to the bounding
+# command: the default 20 must replace 0, and a leaked 0 would be executed
+# unbounded (hang finishes, status is not timeout). Wall-clock elapsed time
+# is not consulted; a 20s bound on a loaded machine is not a test failure.
 test_zero_bound_falls_back_to_a_real_bound() {
-  local started finished value
+  local value
+  RECORD_TIMEOUT_LOG="$TMP_ROOT/applied-timeout-bounds.log"
   for value in 0 00; do
-    started=$(date +%s)
+    : > "$RECORD_TIMEOUT_LOG"
     run_probe "bound-zero-$value" grok -- "FM_FAKE_GROK_MODE=hang" "FM_VENDOR_AUTH_PROBE_TIMEOUT=$value"
-    finished=$(date +%s)
     assert_field "$RUN_LINE" status timeout "a zero bound must fall back to the default bound, not to no bound"
-    [ $((finished - started)) -lt 28 ] \
-      || fail "a zero bound removed the hard bound: took $((finished - started))s"
+    assert_applied_bound 20 "zero bound '$value'"
   done
+  RECORD_TIMEOUT_LOG=
   pass "zero and all-zero bounds fall back to the default instead of removing the hard bound"
 }
 
