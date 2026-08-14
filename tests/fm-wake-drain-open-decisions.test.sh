@@ -224,3 +224,34 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+
+# The drain must print the folded ledger key, not only the raw status text.
+# Worker-written needs-decision: [key=slug] ... used to fold as default, so the
+# section showed the slug in the note while --resolve-key slug refused.
+test_post_colon_and_end_of_line_keys_print_the_folded_key() {
+  local dir state out
+  dir=$(make_case loose-key-display)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision: [key=after] pick REST or RPC\n' > "$state/after.status"
+  printf 'needs-decision: review gate 3 ask-user findings [key=review-ask-user]\n' > "$state/endline.status"
+  printf 'needs-decision: option A: ship now vs later [key=ship-timing]\n' > "$state/colon.status"
+  printf 'blocked: waiting on credentials\n' > "$state/unkeyed.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on post-colon decision keys"
+
+  grep -F 'after [key=after] needs-decision:' "$out" >/dev/null \
+    || fail "a key immediately after the colon was not printed as the folded key: $(cat "$out")"
+  grep -F 'endline [key=review-ask-user] needs-decision:' "$out" >/dev/null \
+    || fail "a key at end of line was not printed as the folded key: $(cat "$out")"
+  grep -F 'colon [key=ship-timing] needs-decision:' "$out" >/dev/null \
+    || fail "a key after another colon in the note was not printed as the folded key: $(cat "$out")"
+  grep -F 'unkeyed [key=default] blocked: waiting on credentials' "$out" >/dev/null \
+    || fail "an unkeyed line did not print its folded default key: $(cat "$out")"
+  if grep -E 'after \[key=default\]|endline \[key=default\]|colon \[key=default\]' "$out" >/dev/null; then
+    fail "a loose-form key was displayed as default: $(cat "$out")"
+  fi
+  pass "OPEN DECISIONS prints the folded key for prefix, post-colon, end-of-line, and default"
+}
+
+test_post_colon_and_end_of_line_keys_print_the_folded_key
