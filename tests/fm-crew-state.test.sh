@@ -342,6 +342,33 @@ run:
 EOF
 }
 
+# Active run whose head is not in the crew worktree (pipeline mirror commits),
+# plus the branch_sync object axi status emits for that worktree.
+run_running_pipeline_owned() {  # <branch> <run_head> <sync_state>
+  cat <<EOF
+run:
+  id: "01NEW"
+  branch: $1
+  status: running
+  head: "$2"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
+branch_sync:
+  state: $3
+  local:
+    branch: $1
+    head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+    clean: true
+  pipeline:
+    run: "01NEW"
+    status: running
+    current_head: "$2"
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # (a) active run-step is authoritative
 test_active_run_is_authoritative() {
@@ -1309,6 +1336,91 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# (a) 2026-08-10/12: two runs on one branch, older terminal and newer active.
+# axi status can bind the older failed run (its head still matches the crew
+# worktree) while a later run on the same branch is live. The newest run wins;
+# a superseded terminal outcome must never become current state.
+test_newer_active_run_not_shadowed_by_older_failed_same_branch() {
+  reset_fakes
+  local d old_short new_short out
+  d=$(new_case two-runs-older-failed)
+  make_repo_on_branch "$d/wt" fm/sf-trace-viewer
+  old_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'later pipeline commit on a newer run'
+  new_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" reset -q --hard "$old_short"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/sf-trace-viewer.meta" "window=fm:fm-sf-trace-viewer" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/sf-trace-viewer)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/sf-trace-viewer ${new_short}  2026-08-12 12:10
+  failed     fm/sf-trace-viewer ${old_short}  2026-08-12 11:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" sf-trace-viewer
+  out=$(run_crew_state "$d" sf-trace-viewer)
+  assert_contains "$out" "state: working" "newer active run on the same branch -> working"
+  assert_contains "$out" "source: run-step" "newer active run remains run-step sourced"
+  assert_not_contains "$out" "state: failed" "older failed run must not become current state"
+  assert_not_contains "$out" "run failed" "older failed detail must not leak"
+  pass "newer active run is not shadowed by an older failed run on the same branch"
+}
+
+# (b) 2026-08-10: pipeline-owned run whose head is not in the crew worktree.
+# The pipeline commits in its own mirror, so rev-parse of the run head fails
+# locally. That is not "no run"; report branch_sync instead of unknown.
+test_pipeline_owned_unmatched_head_not_unknown() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-unmatched)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-lab
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-lab.meta" "window=fm:fm-feat-herdr-lab" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  # Head is a well-formed SHA that is not in this worktree object store.
+  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-herdr-lab cafebabedeadbeef pipeline_owned)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-herdr-lab
+  out=$(run_crew_state "$d" feat-herdr-lab)
+  assert_contains "$out" "state: working" "pipeline-owned unmatched head -> working"
+  assert_contains "$out" "source: run-step" "pipeline-owned unmatched head stays run-step"
+  assert_contains "$out" "branch_sync: pipeline_owned" "unmatched current run reports branch_sync"
+  assert_not_contains "$out" "state: unknown" "pipeline-owned unmatched head is not unknown"
+  assert_not_contains "$out" "validating (running)" "unmatched head must not claim step semantics"
+  pass "pipeline-owned unmatched head reports branch_sync, not unknown"
+}
+
+# Combined incident: axi status returns the live run (unresolvable head) while
+# the runs list still has an older failed row whose SHA matches the worktree.
+# The older terminal row must not win.
+test_pipeline_owned_unmatched_head_not_older_failed() {
+  reset_fakes
+  local d old_short out
+  d=$(new_case pipeline-owned-not-older-failed)
+  make_repo_on_branch "$d/wt" fm/sf-docs
+  old_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/sf-docs.meta" "window=fm:fm-sf-docs" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/sf-docs cafebabedeadbeef pipeline_owned)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/sf-docs cafebab  2026-08-11 14:10
+  failed     fm/sf-docs ${old_short}  2026-08-11 13:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" sf-docs
+  out=$(run_crew_state "$d" sf-docs)
+  assert_contains "$out" "state: working" "live unmatched run -> working"
+  assert_contains "$out" "source: run-step" "live unmatched run stays run-step"
+  assert_contains "$out" "branch_sync: pipeline_owned" "live unmatched run reports branch_sync"
+  assert_not_contains "$out" "state: failed" "older matching failed run must not win"
+  pass "pipeline-owned unmatched head is not replaced by an older failed run"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1470,8 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_newer_active_run_not_shadowed_by_older_failed_same_branch
+test_pipeline_owned_unmatched_head_not_unknown
+test_pipeline_owned_unmatched_head_not_older_failed
 
 echo "all fm-crew-state tests passed"
