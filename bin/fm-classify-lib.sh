@@ -168,7 +168,19 @@ status_is_paused_or_captain_held() {  # <status-line>
 #   resolved       [key=api-shape]: <how it was decided>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser still
+# That whole-line scan is the DECISION fold's rule only. The routed-work
+# activity fold further below keeps reading the prefix before the first colon:
+# it never had the post-colon defect, and a phase opened under a key that mere
+# note prose happened to name would never be closed by that phase's own unkeyed
+# terminal line, leaving a permanently open phase that consumers read as
+# evidence a parent event was superseded.
+# A MALFORMED slug is decided by the fold, not by these parsers: an opening verb
+# falls back to "default" so the escalation still surfaces, while a closing verb
+# is not a decision transition at all. Losing an escalation silently is strictly
+# worse than the refusal this change set out to fix - the old bug at least
+# failed loudly - so the safe direction is always surface-the-open, never
+# auto-close.
+# The parsers are pure reads of a single line; the verb parser still
 # strips a key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
@@ -183,21 +195,42 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     *) printf '%s' "$1" ;;
   esac
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
+# First "[key=<slug>]" token in <text>: prints the slug and returns 0, returns 1
+# when <text> carries no token at all, and returns 2 when that first token's
+# slug is malformed. The two key parsers below differ only in how much of the
+# line they hand in; what a malformed token MEANS is each fold's own call.
+_fm_key_token() {  # <text> -> slug
+  local text=$1 k
+  case "$text" in
+    *\[key=*\]*) ;;
+    *) return 1 ;;
+  esac
+  k=${text#*\[key=}
+  k=${k%%\]*}
+  case "$k" in
+    ''|*[!A-Za-z0-9._-]*) return 2 ;;
+  esac
+  printf '%s' "$k"
+}
+_fm_decision_key() {  # <status-line> -> key slug, "default" when no token, 1 when malformed
   # Scan the whole line, not only the prefix before the first colon: workers
   # commonly write needs-decision: [key=slug] ... and may put the token at
   # end of line after other colons. First token wins.
-  local line=$1 k
-  case "$line" in
-    *\[key=*\]*)
-      k=${line#*\[key=}
-      k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
-      esac
-      ;;
-    *) printf 'default' ;;
+  local k
+  k=$(_fm_key_token "$1")
+  case $? in
+    0) printf '%s' "$k" ;;
+    1) printf 'default' ;;
+    *) return 1 ;;
+  esac
+}
+_fm_activity_key() {  # <status-line> -> phase key from the prefix before the first colon
+  local k
+  k=$(_fm_key_token "${1%%:*}")
+  case $? in
+    0) printf '%s' "$k" ;;
+    1) printf 'default' ;;
+    *) return 1 ;;
   esac
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
@@ -263,7 +296,14 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   verb=$(status_line_verb "$line")
-  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
+  if ! key=$(_fm_decision_key "$line"); then
+    # Malformed token: surface the open, never auto-close (see the grammar
+    # comment above status_line_verb).
+    case "$verb" in
+      needs-decision|blocked) key=default ;;
+      *) printf '%s' "$open"; return 0 ;;
+    esac
+  fi
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
@@ -404,7 +444,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=3
+FM_OPEN_DECISIONS_FOLD_VERSION=4
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
@@ -548,6 +588,9 @@ EOF
 # key closes the phase, because it has moved to a terminal or separately tracked
 # state.
 # A bare legacy event uses the default key, preserving one-phase behavior.
+# Phase keys are read from the prefix before the first colon only: a note that
+# merely names some decision's key must not open a phase under it, because the
+# phase's own unkeyed terminal line would then never close it.
 # This fold is evidence about whether a parent event was explicitly superseded.
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
@@ -560,7 +603,7 @@ _fm_status_open_activities_stream() {
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
+    key=$(_fm_activity_key "$line") || continue
     case "$verb" in
       working|"$pause")
         note=$(status_line_note "$line")

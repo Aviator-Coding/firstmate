@@ -204,7 +204,6 @@ test_classifier_primitives() {
     'needs-decision: no token at all' \
     'needs-decision [key=keep]: still open after default close' \
     'resolved: closed the unkeyed default only' \
-    'needs-decision [key=bad key]: malformed' \
     > "$state/keys.status"
   open=$(status_open_decisions "$state/keys.status")
   printf '%s' "$open" | grep -F $'before\t' >/dev/null \
@@ -219,14 +218,41 @@ test_classifier_primitives() {
     || fail "an unkeyed resolved: closed a keyed decision instead of default only"
   printf '%s' "$open" | grep -F $'default\t' >/dev/null \
     && fail "an unkeyed resolved: did not close the default decision"
-  printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
-    && fail "an invalid key slug entered the open-decision set"
   printf '%s\n' \
     'needs-decision: [key=loose-close] choose' \
     'resolved: [key=loose-close] went with A' \
     > "$state/loose-close.status"
   [ -z "$(status_open_decisions "$state/loose-close.status")" ] \
     || fail "a resolved line with the key after the colon did not close that key"
+  # A malformed slug never enters the set, but an OPENING verb still surfaces
+  # under default: silently swallowing an escalation is worse than the loud
+  # refusal this fold set out to fix.
+  printf '%s\n' \
+    'needs-decision: should the brief still require [key=<slug>]?' \
+    > "$state/malformed-open.status"
+  open=$(status_open_decisions "$state/malformed-open.status")
+  printf '%s' "$open" | grep -F $'<slug>\t' >/dev/null \
+    && fail "an invalid key slug entered the open-decision set"
+  printf '%s' "$open" | grep -F $'default\tneeds-decision\t' >/dev/null \
+    || fail "a needs-decision with a malformed key token was dropped instead of surfacing under default"
+  printf '%s\n' 'blocked [key=bad key]: malformed blocker' > "$state/malformed-block.status"
+  open=$(status_open_decisions "$state/malformed-block.status")
+  printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
+    && fail "an invalid key slug entered the open-decision set"
+  printf '%s' "$open" | grep -F $'default\tblocked\t' >/dev/null \
+    || fail "a blocked line with a malformed key token was dropped instead of surfacing under default"
+  # A CLOSING verb keeps the drop, so a malformed key can never close anything.
+  printf '%s\n' \
+    'needs-decision: plain unkeyed escalation' \
+    'needs-decision [key=keeper]: keyed escalation' \
+    'resolved [key=bad key]: malformed close before the colon' \
+    'resolved: [key=also bad] malformed close after the colon' \
+    > "$state/malformed-close.status"
+  open=$(status_open_decisions "$state/malformed-close.status")
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    || fail "a resolved line with a malformed key token closed the default decision"
+  printf '%s' "$open" | grep -F $'keeper\t' >/dev/null \
+    || fail "a resolved line with a malformed key token closed a keyed decision"
   cat > "$state/activity.status" <<'EOF'
 working [key=phase7]: Phase 7 started
 working [key=phase6]: Phase 6 started
@@ -249,6 +275,21 @@ EOF
   printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
+  # The decision fold's whole-line key scan must NOT reach phases: a key named
+  # only in a note would open a phase that the phase's own unkeyed terminal
+  # line can never close, and an open phase is read as supersession evidence.
+  printf '%s\n' \
+    'working: implementing the [key=api-shape] decision' \
+    'done: shipped' \
+    > "$state/prose-key-activity.status"
+  [ -z "$(status_open_activities "$state/prose-key-activity.status")" ] \
+    || fail "a key named only in an activity note left a phase open forever"
+  printf '%s\n' \
+    'working [key=phase9]: rolling out the [key=api-shape] decision' \
+    'done [key=phase9]: rolled out' \
+    > "$state/prefix-key-activity.status"
+  [ -z "$(status_open_activities "$state/prefix-key-activity.status")" ] \
+    || fail "an activity note key outranked the phase's own prefix key"
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
