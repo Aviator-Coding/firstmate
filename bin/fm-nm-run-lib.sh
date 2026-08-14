@@ -7,6 +7,9 @@
 # abort, see its "Fix 1" header comment). Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
+# Also owns the axi/home TOON extractors for branch_sync.state and
+# pipeline.status that let crew-state distinguish "no run" from a current
+# pipeline-owned run whose head is not in the crew worktree.
 #
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
@@ -53,6 +56,46 @@ fm_nm_strip_quotes() {
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
+}
+
+# 0 if $1 is a non-terminal no-mistakes run/step status. Coarse `runs` rows
+# only emit running/completed/cancelled/failed; axi status also uses fixing,
+# ci, and the parked gate statuses.
+fm_nm_status_is_active() {
+  case "${1:-}" in
+    running|fixing|ci|awaiting_approval|fix_review) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Lines of the top-level branch_sync: block in axi/home TOON $1, if present.
+fm_nm_branch_sync_block() {  # <toon-output>
+  printf '%s\n' "$1" | awk '
+    /^branch_sync:[[:space:]]*$/ {inb=1; next}
+    inb && /^[^[:space:]]/ {exit}
+    inb {print}
+  '
+}
+
+# branch_sync.state from axi/home TOON $1, quotes stripped. Empty when absent.
+fm_nm_branch_sync_state() {  # <toon-output>
+  local raw
+  raw=$(fm_nm_branch_sync_block "$1" | sed -n 's/^[[:space:]]*state:[[:space:]]*//p' | head -1)
+  fm_nm_strip_quotes "$raw"
+}
+
+# branch_sync.pipeline.status from axi/home TOON $1, quotes stripped.
+fm_nm_branch_sync_pipeline_status() {  # <toon-output>
+  local raw
+  raw=$(fm_nm_branch_sync_block "$1" | awk '
+    /^[[:space:]]*pipeline:[[:space:]]*$/ {inp=1; next}
+    inp && /^[[:space:]]+status:[[:space:]]*/ {
+      sub(/^[[:space:]]+status:[[:space:]]*/, "")
+      print
+      exit
+    }
+  ')
+  fm_nm_strip_quotes "$raw"
 }
 
 # 0 if run head $2 matches worktree $1's code identity, per the same rule

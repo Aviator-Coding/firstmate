@@ -25,6 +25,9 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) two runs on one branch: older terminal + newer active -> the newer run
+#   (m) pipeline-owned run whose head is not in the crew worktree -> branch_sync,
+#       never unknown and never an older matching-head failed run
 set -u
 
 # shellcheck source=tests/lib.sh
