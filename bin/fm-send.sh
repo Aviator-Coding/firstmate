@@ -49,9 +49,9 @@
 # folds lives in this home's own state dir (a remote mate's escalations reach
 # it through the parent-replies ingest); only the answer message crosses the
 # backend or remote transport. Each named key must currently be open in that
-# ledger per status_open_decisions (bin/fm-classify-lib.sh) or fm-send refuses
-# before sending, so a mistyped key cannot deliver an answer while silently
-# orphaning the decision. A failed or unconfirmed send never closes a key; a
+# ledger per status_decision_key_is_open (bin/fm-classify-lib.sh) or fm-send
+# refuses before sending, so a mistyped key cannot deliver an answer while
+# silently orphaning the decision. A failed or unconfirmed send never closes a key; a
 # delivered answer whose closing append fails exits nonzero with the exact
 # manual close command, leaving the decision open to re-surface (the safe
 # direction). A send without the flag never closes anything: a routine steer,
@@ -344,9 +344,11 @@ fi
 # Validate the answerer-closes request before any durable mutation or send: the
 # target must have a task ledger in THIS home, the send must carry an answer
 # message, and every named key must be open right now in that ledger per the
-# ONE authoritative fold (status_open_decisions). Refusing here, before the
-# send, is what keeps a mistyped key loud instead of delivering an answer that
-# silently leaves its decision open.
+# ONE authoritative fold (status_open_decisions via
+# status_decision_key_is_open). The wake drain lists that same fold, so a key
+# printed in OPEN DECISIONS is the key this check will accept. Refusing here,
+# before the send, is what keeps a mistyped key loud instead of delivering an
+# answer that silently leaves its decision open.
 RESOLVE_STATUS_FILE=
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
@@ -363,15 +365,11 @@ if [ -n "$RESOLVE_KEYS" ]; then
   fi
   RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
-  resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   for k in $RESOLVE_KEYS; do
-    case "$resolve_open_set" in
-      "$k"$'\t'*|*$'\n'"$k"$'\t'*) ;;
-      *)
-        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE (already closed, mistyped, or transferred). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
-        exit 1
-        ;;
-    esac
+    if ! status_decision_key_is_open "$RESOLVE_STATUS_FILE" "$k"; then
+      echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE (already closed, mistyped, or transferred). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+      exit 1
+    fi
   done
 fi
 

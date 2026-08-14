@@ -160,13 +160,16 @@ status_is_paused_or_captain_held() {  # <status-line>
 # rule 6), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+# format): an OPTIONAL "[key=<slug>]" token may sit between the verb and the
+# colon, or anywhere later on the same line:
 #   needs-decision [key=api-shape]: <summary>
+#   needs-decision: [key=api-shape] <summary>
+#   needs-decision: review findings [key=api-shape]
 #   resolved       [key=api-shape]: <how it was decided>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser strips any
-# key token before the colon so the leading word is recovered cleanly.
+# The three parsers are pure reads of a single line; the verb parser still
+# strips a key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
@@ -181,10 +184,13 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
-  case "$prefix" in
+  # Scan the whole line, not only the prefix before the first colon: workers
+  # commonly write needs-decision: [key=slug] ... and may put the token at
+  # end of line after other colons. First token wins.
+  local line=$1 k
+  case "$line" in
     *\[key=*\]*)
-      k=${prefix#*\[key=}
+      k=${line#*\[key=}
       k=${k%%\]*}
       case "$k" in
         ''|*[!A-Za-z0-9._-]*) return 1 ;;
@@ -298,6 +304,20 @@ status_open_decisions() {  # <status-file>
   printf '%s' "$open"
 }
 
+# 0 if <key> is currently open in <status-file> per status_open_decisions.
+# This is the membership predicate fm-send --resolve-key uses; the wake drain
+# lists the same fold (via scan_open_decisions_incremental) rather than
+# re-deriving which keys are open.
+status_decision_key_is_open() {  # <status-file> <key>
+  local f=$1 want=$2 open
+  [ -n "$want" ] || return 1
+  open=$(status_open_decisions "$f")
+  case "$open" in
+    "$want"$'\t'*|*$'\n'"$want"$'\t'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Fleet-wide wrapper around status_open_decisions: scans every task's status
 # log under <state> and prefixes each still-open decision with its owning task
 # id, so a per-wake or per-session surface can print the consolidated open set
@@ -384,7 +404,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=2
+FM_OPEN_DECISIONS_FOLD_VERSION=3
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
