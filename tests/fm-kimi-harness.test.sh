@@ -288,9 +288,14 @@ test_kimi_hook_remove_preserves_owned_newline_boundary() {
   } > "$expected"
   cmp -s "$expected" "$config" \
     || fail "removal did not preserve appended captain config on its own line"
-  "$PYTHON_BIN" - "$config" <<'PY' || fail "config with appended captain TOML did not parse after removal"
+  "$PYTHON_BIN" - "$config" "$ROOT/bin" <<'PY' || fail "config with appended captain TOML did not parse after removal"
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ImportError:
+    sys.path.insert(0, sys.argv[2])
+    import fm_toml as tomllib
 
 with open(sys.argv[1], "rb") as stream:
     tomllib.load(stream)
@@ -330,6 +335,22 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
   cmp -s "$partial/before" "$partial/.kimi-code/config.toml" \
     || fail "partial marker refusal changed config bytes"
   pass "Kimi hook install refuses missing, malformed, and surprising config without writing"
+}
+
+test_kimi_hook_install_works_without_stdlib_tomllib() {
+  local home config blocker
+  home="$TMP_ROOT/config-no-tomllib"
+  config="$home/.kimi-code/config.toml"
+  blocker="$home/hide-tomllib"
+  mkdir -p "$home/.kimi-code" "$blocker"
+  printf 'default_model = "test"\n' > "$config"
+  printf 'raise ImportError("hidden for test")\n' > "$blocker/tomllib.py"
+
+  HOME="$home" PYTHONPATH="$blocker${PYTHONPATH:+:$PYTHONPATH}" "$KIMI_HOOK" install \
+    || fail "Kimi hook install refused when stdlib tomllib was hidden"
+  assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$config" \
+    "hidden-tomllib install did not write the Firstmate region"
+  pass "Kimi hook install validates TOML without stdlib tomllib"
 }
 
 test_kimi_hook_install_refuses_without_jq() {
@@ -660,6 +681,7 @@ test_kimi_bordered_prompt_needs_no_override() {
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
+test_kimi_hook_install_works_without_stdlib_tomllib
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
