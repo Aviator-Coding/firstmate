@@ -6,6 +6,8 @@
 # serializes it: install adds or replaces one marker-delimited Firstmate region,
 # and remove excises only that region. Missing, malformed, symlinked, partially
 # marked, or otherwise surprising config is refused without a config write.
+# Validation uses stdlib tomllib when the active python3 has it, otherwise the
+# bundled bin/fm_toml reader, so stock macOS python3 3.9 can still install.
 #
 # The installed Stop hook always exits 0 and stays silent. It reads cwd from the
 # hook payload, checks for a .fm-kimi-turnend pointer before registry work, and
@@ -34,7 +36,7 @@ if [ -z "${HOME:-}" ]; then
   exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
-  printf 'fm-kimi-turnend-hook: refused: python3 with tomllib is required to validate config.toml.\n' >&2
+  printf 'fm-kimi-turnend-hook: refused: python3 is required to validate config.toml.\n' >&2
   exit 1
 fi
 if [ "$ACTION" = install ] && ! command -v jq >/dev/null 2>&1; then
@@ -42,7 +44,8 @@ if [ "$ACTION" = install ] && ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-python3 - "$ACTION" "$HOME/.kimi-code" <<'PY'
+HOOK_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) || exit 1
+python3 - "$ACTION" "$HOME/.kimi-code" "$HOOK_DIR" <<'PY'
 import os
 import re
 import shutil
@@ -50,17 +53,23 @@ import stat
 import sys
 import tempfile
 
+ACTION = sys.argv[1]
+CONFIG_DIR = sys.argv[2]
+HOOK_DIR = sys.argv[3]
 try:
     import tomllib
 except ImportError:
-    print(
-        "fm-kimi-turnend-hook: refused: python3 with tomllib is required to validate config.toml.",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-
-ACTION = sys.argv[1]
-CONFIG_DIR = sys.argv[2]
+    if HOOK_DIR not in sys.path:
+        sys.path.insert(0, HOOK_DIR)
+    try:
+        import fm_toml as tomllib
+    except ImportError:
+        print(
+            "fm-kimi-turnend-hook: refused: python3 cannot import a TOML reader "
+            "(stdlib tomllib or bundled fm_toml).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 CONFIG = os.path.join(CONFIG_DIR, "config.toml")
 HOOK = os.path.join(CONFIG_DIR, "fm-turn-end.sh")
 REGISTRY = os.path.join(CONFIG_DIR, "fm-turn-end.d")
