@@ -297,6 +297,29 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+test_relaunch_drops_a_stale_worktree_release_marker() {
+  local dir out rc
+  dir=$(new_case released-marker rl20a)
+  add_ship_task "$dir" rl20a claude
+  # A teardown that failed after returning the isolated copy leaves this marker
+  # beside a retained worktree=. A relaunch re-claims that worktree, so the
+  # marker must not survive onto the live record.
+  {
+    printf '%s\n' "worktree_released=$dir/wt"
+    printf '%s\n' 'pr_head=feature/released'
+  } >> "$dir/home/state/rl20a.meta"
+
+  out=$(run_control "$dir" rl20a relaunch --note "re-claiming the isolated copy"); rc=$?
+  expect_code 0 "$rc" "relaunch should republish the record"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl20a worktree_released)" ] \
+    || fail "a relaunch must not carry a stale worktree release marker onto the live record"
+  [ "$(meta_field "$dir" rl20a worktree)" = "$dir/wt" ] \
+    || fail "the relaunched record must still name the worktree it re-claimed"
+  [ "$(meta_field "$dir" rl20a pr_head)" = "feature/released" ] \
+    || fail "dropping the release marker must not drop unrelated durable metadata"
+  pass "fm-control relaunch: a stale worktree release marker never survives onto a re-claimed record"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
   dir=$(new_case metadata-race rl28)
@@ -1301,6 +1324,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_drops_a_stale_worktree_release_marker
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

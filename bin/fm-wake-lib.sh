@@ -800,3 +800,49 @@ EOF
   fi
   return 0
 }
+
+# Shared worktree-claim helpers used by bin/fm-spawn.sh and bin/fm-teardown.sh
+# to detect when the same isolated worktree is already recorded elsewhere
+# before either script releases or reclaims it. Kept here since both scripts
+# already source this file.
+
+fm_worktree_paths_match() {  # <path-a> <path-b>
+  local a=$1 b=$2 a_real b_real
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  [ "$a" = "$b" ] && return 0
+  [ -d "$a" ] && [ -d "$b" ] || return 1
+  a_real=$(CDPATH='' cd -- "$a" 2>/dev/null && pwd -P) || return 1
+  b_real=$(CDPATH='' cd -- "$b" 2>/dev/null && pwd -P) || return 1
+  [ -n "$a_real" ] && [ "$a_real" = "$b_real" ]
+}
+
+# True when <meta> already records <worktree> as released back to the pool.
+fm_worktree_release_recorded() {  # <meta> <worktree>
+  local meta=$1 wt=$2 released
+  [ -f "$meta" ] && [ -n "$wt" ] || return 1
+  released=$(fm_meta_get "$meta" worktree_released)
+  [ -n "$released" ] || return 1
+  fm_worktree_paths_match "$wt" "$released"
+}
+
+# Every task record reachable from <state-dir>, including those inside
+# descendant secondmate homes: crewmates under a secondmate home draw from the
+# same project treehouse pool, so a claim on a pool slot is invisible to a
+# scan of one state dir alone.
+FM_WORKTREE_META_SCAN=()
+fm_worktree_collect_metas_recursive() {  # <state-dir> <depth>
+  local state_dir=$1 depth=$2 meta kind home wt
+  [ "$depth" -le 16 ] || return 0
+  [ -d "$state_dir" ] || return 0
+  for meta in "$state_dir"/*.meta; do
+    [ -f "$meta" ] || continue
+    FM_WORKTREE_META_SCAN+=("$meta")
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" = secondmate ] || continue
+    wt=$(fm_meta_get "$meta" worktree)
+    home=$(fm_meta_get "$meta" home)
+    [ -n "$home" ] || home=$wt
+    [ -n "$home" ] || continue
+    fm_worktree_collect_metas_recursive "$home/state" "$((depth + 1))"
+  done
+}

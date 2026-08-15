@@ -79,8 +79,12 @@
 #   plus authoritative metadata may replace one exact agent-free husk in place.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
+#   duplicate-agent risk is independently absent. Treehouse allocation is
+#   unchanged. After treehouse get on a same-identity restart (this id already
+#   has meta), spawn records worktree_released=<path> on any leftover record
+#   that still names the taken worktree so teardown can tell that stale claim
+#   from a live double-claim. A first spawn of a different id does not stamp
+#   another task's live claim released.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -1647,6 +1651,50 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Keep worktree= (endpoint identity) and set worktree_released=<path>.
+# Same durable write shape as bin/fm-teardown.sh's teardown_record_worktree_release.
+spawn_record_worktree_release() {  # <meta> <worktree>
+  local meta=$1 wt=$2 tmp rc=0 lock
+  [ -f "$meta" ] && [ -n "$wt" ] || return 0
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_try_acquire "$lock" || {
+    echo "error: could not lock leftover record $meta to mark $wt released after this restart took that isolated copy" >&2
+    return 1
+  }
+  tmp="$meta.tmp.$$"
+  grep -v '^worktree_released=' "$meta" > "$tmp" || rc=$?
+  if [ "$rc" -gt 1 ] \
+     || ! printf 'worktree_released=%s\n' "$wt" >> "$tmp" \
+     || ! mv -f -- "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$lock"
+    echo "error: could not record worktree_released=$wt on leftover $(basename "$meta" .meta); refusing to launch over a claim that is still live" >&2
+    return 1
+  fi
+  fm_lock_release "$lock"
+  echo "spawn: recorded worktree_released=$wt on leftover task $(basename "$meta" .meta); that record no longer claims the isolated copy this restart took" >&2
+}
+
+# After treehouse get on a same-identity restart, mark leftover records that
+# still name the taken worktree as released. A first spawn of a different id
+# must not call this: that is a live double-claim teardown must still refuse.
+spawn_record_leftover_worktree_releases() {  # <worktree>
+  local wt=$1 meta other_wt self
+  [ -n "$wt" ] || return 0
+  self="$STATE/$ID.meta"
+  FM_WORKTREE_META_SCAN=()
+  fm_worktree_collect_metas_recursive "$STATE" 1
+  for meta in ${FM_WORKTREE_META_SCAN[@]+"${FM_WORKTREE_META_SCAN[@]}"}; do
+    [ "$meta" != "$self" ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    fm_worktree_paths_match "$wt" "$other_wt" || continue
+    fm_worktree_release_recorded "$meta" "$other_wt" && continue
+    spawn_record_worktree_release "$meta" "$wt" || return 1
+  done
+  return 0
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -2130,6 +2178,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  # Same-identity restart: this id already has a published record. A leftover
+  # claimant of the worktree we just took is stale, not a live double-claim.
+  if [ -f "$STATE/$ID.meta" ]; then
+    spawn_record_leftover_worktree_releases "$WT" || exit 1
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -2476,7 +2529,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree worktree_released project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
