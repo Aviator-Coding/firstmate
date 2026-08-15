@@ -533,7 +533,7 @@ ok - forced secondmate teardown retains Herdr child identity until exact pane di
 ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
 ```
 
-The same teardown fixture was re-run on 2026-08-13 after moving every refusable Herdr close and the post-close presence gate ahead of branch delete and treehouse return, and after adding the cross-task worktree claim refusal.
+The same teardown fixture was re-run on 2026-08-14 after moving every refusable Herdr close and the post-close presence gate ahead of branch delete and treehouse return, after adding the cross-task worktree claim refusal ahead of every mutation including the forced secondmate child cleanup, and after replacing the released-pointer clear with a `worktree_released=` marker that leaves `worktree=` intact.
 
 ```sh
 tests/fm-teardown.test.sh
@@ -546,9 +546,15 @@ Observed output:
 ok - herdr projection teardown retains every record when post-close presence is unknown
 ok - herdr projection teardown refuses an active-tab close before returning the isolated copy
 ok - teardown refuses when another task already records the same isolated copy
+ok - teardown still completes when another task records a different isolated copy
+ok - teardown proceeds when the other record already released its claim
+ok - teardown refuses when a crewmate under a secondmate home records the same isolated copy
+ok - forced secondmate teardown refuses a claimed child worktree before any child cleanup
+ok - a post-return failure records the release and the rerun finishes without returning the slot twice
+ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
 ```
 
-Observed guarantees: an active-tab projected close and an unknown post-close presence both refuse while the isolated copy, the task branch, and `worktree=` remain intact and treehouse is not invoked; two task records naming the same worktree refuse teardown of either one without touching the directory, including under `--force`.
+Observed guarantees: an active-tab projected close and an unknown post-close presence both refuse while the isolated copy, the task branch, and `worktree=` remain intact and treehouse is not invoked; two task records naming the same worktree refuse teardown of either one without touching the directory, including under `--force`, while an unrelated worktree still tears down normally. The claim scan reaches crewmate records inside descendant secondmate home `state/` directories, and it runs before the forced secondmate child cleanup, so a live task's claim on a child's pool slot refuses while every child record, child worktree, and the home itself are still intact. A failure after a successful return records `worktree_released=<path>` and keeps `worktree=`, so the retained record still validates as an endpoint and the rerun completes the remaining cleanup without returning the same slot a second time; a record that already carries that marker no longer counts as a live claim, which is the documented way out of a mutual claim.
 
 ### Composer and operational input
 
