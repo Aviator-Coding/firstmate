@@ -2600,6 +2600,138 @@ SH
   pass "herdr presentation ordering: malformed socket metadata is warning-only and read-only"
 }
 
+# A short symlink whose physical parent exceeds Darwin sun_path must stay
+# connectable. This is the real-Herdr 0.8.0 presentation-order miss when
+# ~/.config/herdr is a home-manager / Nix store symlink: workspace.move was
+# attempted, then AF_UNIX refused the pwd -P spelling, so workers stayed in
+# create-append order.
+make_overlong_socket_spelling() {  # <dir> -> prints "short<TAB>physical"
+  local dir=$1 short phys
+  # The short spelling must live under /tmp so it stays inside sun_path even
+  # when TMP_ROOT is a long /var/folders path.
+  short="/tmp/fm-hsk-$(basename "$dir")-$$"
+  phys="$dir/physical-$(python3 -c 'print("n" * 80)')/sessions/fm-lab-overlong-path/herdr.sock"
+  mkdir -p "$(dirname "$phys")"
+  rm -rf "$short"
+  ln -sfn "$(dirname "$phys")" "$short"
+  : > "$short/herdr.sock"
+  printf '%s\t%s\n' "$short/herdr.sock" "$phys"
+}
+
+test_presentation_socket_path_stays_connectable_when_canonical_exceeds_af_unix() {
+  local dir log resp fb pair short_sock phys_sock resolved
+  dir="$TMP_ROOT/connectable-socket"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  pair=$(make_overlong_socket_spelling "$dir") || fail "could not build the long-symlink socket fixture"
+  short_sock=${pair%%$'\t'*}
+  phys_sock=${pair#*$'\t'}
+  [ "${#phys_sock}" -gt 103 ] || fail "the physical socket spelling is not longer than sun_path: $phys_sock"
+  [ "${#short_sock}" -le 103 ] || fail "the short symlink spelling must itself fit sun_path: $short_sock"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$short_sock\"}]}" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  resolved=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_connect_socket fmtest' "$ROOT") \
+    || fail "connectable session socket resolution failed"
+  [ "${#resolved}" -le 103 ] || fail "session socket path exceeded sun_path: $resolved"
+  [ "$resolved" = "$short_sock" ] || [ "$resolved" = "$(cd "$(dirname "$short_sock")" && pwd -P)/herdr.sock" ] \
+    || fail "session socket path was not a spelling of the reported socket: $resolved"
+  [ "$resolved" != "$phys_sock" ] || fail "session socket path used the unconnectable physical spelling"
+  rm -rf "$(dirname "$short_sock")"
+  pass "herdr presentation socket: a short symlink to an overlong physical parent stays connectable"
+}
+
+test_projection_order_passes_a_connectable_socket_to_the_mover() {
+  local dir log resp fb mover pair short_sock out status
+  dir="$TMP_ROOT/order-connectable-socket"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  pair=$(make_overlong_socket_spelling "$dir") || fail "could not build the long-symlink socket fixture"
+  short_sock=${pair%%$'\t'*}
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"wH","label":"2ndmate-alpha"},{"workspace_id":"w2","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.8.0","protocol":19},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$short_sock\"}]}" > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" > "$FM_FAKE_MOVER_PATH"
+exit 9
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_PATH="$dir/mover.path" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "wH\twH:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w2 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "overlong physical socket must not fail the spawn: $out"
+  [ -f "$dir/mover.path" ] || fail "ordering did not invoke the workspace mover"
+  [ "$(wc -c < "$dir/mover.path" | tr -d '[:space:]')" -le 104 ] \
+    || fail "mover received an overlong socket path: $(cat "$dir/mover.path")"
+  [ "$(cat "$dir/mover.path")" = "$short_sock" ] \
+    || fail "mover did not receive the connectable spelling: $(cat "$dir/mover.path")"
+  rm -rf "$(dirname "$short_sock")"
+  pass "herdr presentation ordering: workspace.move uses a connectable socket when the physical path exceeds sun_path"
+}
+
+test_workspace_move_transport_connects_through_a_short_symlink() {
+  local dir pair short_sock phys_sock status
+  dir="$TMP_ROOT/mover-symlink"; mkdir -p "$dir"
+  pair=$(make_overlong_socket_spelling "$dir") || fail "could not build the long-symlink socket fixture"
+  short_sock=${pair%%$'\t'*}
+  phys_sock=${pair#*$'\t'}
+  rm -f "$short_sock"
+  python3 - "$short_sock" "$phys_sock" "$ROOT/bin/backends/herdr-workspace-move.py" <<'PY' || fail "symlink socket transport probe failed"
+import json, os, socket, subprocess, sys, threading
+
+short, phys, mover = sys.argv[1:]
+reply = {
+    "id": "fm-workspace-move",
+    "result": {
+        "type": "workspace_list",
+        "workspaces": [{"workspace_id": "w2", "label": "moved"}],
+    },
+}
+
+def serve(path, ready, result):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+    ready.set()
+    conn, _ = server.accept()
+    data = b""
+    while b"\n" not in data:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    conn.sendall((json.dumps(reply) + "\n").encode())
+    conn.close()
+    server.close()
+    result.append(data)
+
+ready = threading.Event()
+got = []
+thread = threading.Thread(target=serve, args=(short, ready, got))
+thread.start()
+if not ready.wait(2):
+    raise SystemExit("listener did not bind the short symlink path")
+completed = subprocess.run([mover, short, "w2", "1"], check=False, capture_output=True, text=True)
+thread.join(2)
+if completed.returncode != 0:
+    raise SystemExit(f"mover failed on the short path: {completed.returncode} {completed.stderr}")
+if '"type":"workspace_list"' not in completed.stdout.replace(" ", ""):
+    raise SystemExit(f"mover did not accept the symlink response: {completed.stdout}")
+overlong = subprocess.run([mover, phys, "w2", "1"], check=False, capture_output=True, text=True)
+if overlong.returncode != 2:
+    raise SystemExit(f"mover must refuse the overlong physical path, got {overlong.returncode}")
+PY
+  rm -rf "$(dirname "$short_sock")"
+  pass "herdr-workspace-move.py: connects through a short symlink and refuses an overlong physical path"
+}
+
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
   local dir state home other_home home_real journal legacy token label out mutation_log
   dir="$TMP_ROOT/projection-reclaim-refusals"; state="$dir/state"; home="$dir/home"; other_home="$dir/other-home"
@@ -4298,6 +4430,9 @@ test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
+test_presentation_socket_path_stays_connectable_when_canonical_exceeds_af_unix
+test_projection_order_passes_a_connectable_socket_to_the_mover
+test_workspace_move_transport_connects_through_a_short_symlink
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk

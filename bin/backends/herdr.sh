@@ -695,7 +695,9 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # a failure, so a socket whose directory was removed still compares by its own
 # literal path. Single owner for every socket-identity comparison in this
 # adapter (the presentation session lock and the launcher-identity same-session
-# proof both use it).
+# proof both use it). Never use this spelling to connect: physically resolving
+# a home-manager or Nix-store symlink can exceed AF_UNIX sun_path (103 usable
+# bytes on Darwin). Connect through fm_backend_herdr_connectable_socket_path.
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
@@ -713,6 +715,45 @@ fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   printf '%s' "$socket"
 }
 
+# Portable strlen ceiling for a Unix-domain socket path. Darwin's sun_path is
+# 104 bytes including the trailing NUL; Linux allows 108. Stay on the Darwin
+# ceiling so one path is connectable on every supported platform.
+FM_BACKEND_HERDR_UNIX_SOCKET_PATH_MAX=103
+
+# fm_backend_herdr_unix_socket_path_usable: absolute path that fits sun_path.
+fm_backend_herdr_unix_socket_path_usable() {  # <path>
+  local path=$1
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ "${#path}" -le "$FM_BACKEND_HERDR_UNIX_SOCKET_PATH_MAX" ]
+}
+
+# fm_backend_herdr_connectable_socket_path: choose a spelling that
+# socket.connect can actually use. Prefer the canonical parent when that
+# still fits, so /tmp and /private/tmp stay one identity. When the physical
+# parent is a long symlink target, keep the shorter herdr-reported spelling.
+fm_backend_herdr_connectable_socket_path() {  # <socket-path>
+  local socket=$1 canonical
+  [ -n "$socket" ] || return 1
+  case "$socket" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  canonical=$(fm_backend_herdr_canonical_socket_path "$socket" 2>/dev/null) || canonical=
+  if [ -n "$canonical" ] && fm_backend_herdr_unix_socket_path_usable "$canonical"; then
+    printf '%s' "$canonical"
+    return 0
+  fi
+  if fm_backend_herdr_unix_socket_path_usable "$socket"; then
+    printf '%s' "$socket"
+    return 0
+  fi
+  return 1
+}
+
 fm_backend_herdr_presentation_session_socket_path() {  # <session>
   local session=$1 sessions socket
   [ -n "$session" ] || return 1
@@ -725,17 +766,34 @@ fm_backend_herdr_presentation_session_socket_path() {  # <session>
       | .socket_path]
     | if length == 1 then .[0] else empty end
   ' 2>/dev/null) || return 1
-  fm_backend_herdr_canonical_socket_path "$socket"
+  case "$socket" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$socket"
+}
+
+# fm_backend_herdr_presentation_session_connect_socket: the AF_UNIX-safe
+# spelling to hand to herdr-workspace-move.py. Identity comparison and lock
+# hashing stay on the canonical form; this path is only for connect(2).
+fm_backend_herdr_presentation_session_connect_socket() {  # <session>
+  local session=$1 socket
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  fm_backend_herdr_connectable_socket_path "$socket"
 }
 
 fm_backend_herdr_presentation_session_lock_path() {  # <session>
-  local session=$1 socket key dir hash
+  local session=$1 socket identity key dir hash
   [ -n "$session" ] || return 1
   socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  # Lock identity stays on the canonical spelling so /tmp and /private/tmp,
+  # or a short symlink and its long target, still share one lock. Connect
+  # uses the shorter path above; file paths may be longer than sun_path.
+  identity=$(fm_backend_herdr_canonical_socket_path "$socket" 2>/dev/null) || identity=$socket
   if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s\0%s' "$session" "$socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
+    hash=$(printf '%s\0%s' "$session" "$identity" | shasum -a 256 2>/dev/null | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s\0%s' "$session" "$socket" | sha256sum 2>/dev/null | awk '{print $1}')
+    hash=$(printf '%s\0%s' "$session" "$identity" | sha256sum 2>/dev/null | awk '{print $1}')
   else
     return 1
   fi
@@ -1046,7 +1104,7 @@ fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <
       printf 'plain\n'
       return 0
     fi
-    socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+    socket=$(fm_backend_herdr_presentation_session_connect_socket "$session") || {
       echo "warning: herdr presentation cleanup found an ambiguous named session socket; closing without the focus-safe removal path" >&2
       printf 'plain\n'
       return 0
@@ -1394,7 +1452,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       return 0
       ;;
   esac
-  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+  socket=$(fm_backend_herdr_presentation_session_connect_socket "$session") || {
     echo "warning: herdr presentation ordering found an ambiguous named session socket; leaving worker in Herdr's current order" >&2
     return 0
   }
@@ -1561,6 +1619,12 @@ fm_backend_herdr_launcher_identity() {  # <session>
     return 1
   }
   session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+    echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
+    return 1
+  }
+  # Compare canonical spellings so a short herdr-reported connect path and an
+  # injected physical path still prove the same server.
+  session_socket=$(fm_backend_herdr_canonical_socket_path "$session_socket") || {
     echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
     return 1
   }

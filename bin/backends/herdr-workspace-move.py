@@ -14,6 +14,10 @@ Wire protocol verified against Herdr 0.7.4, protocol 16:
              {"type":"workspace_list","workspaces":[...]}}\n
 Usage: herdr-workspace-move.py <socket_path> <workspace_id> <insert_index>
 
+<socket_path> must be an AF_UNIX-connectable spelling. Pass the
+herdr-reported path when physically resolving its parent would exceed
+the platform sun_path limit (103 usable bytes on Darwin).
+
 Exit status:
   0  the server returned the matching workspace_list response;
   2  arguments or socket connection were invalid;
@@ -58,6 +62,10 @@ def main(argv):
         return 2
     socket_path, workspace_id, raw_index = argv[1:]
     if not socket_path.startswith("/") or not workspace_id:
+        return 2
+    # Darwin sun_path is 104 bytes including NUL; reject before connect so
+    # the caller sees a parameter error instead of a platform OSError.
+    if len(socket_path.encode("utf-8", "replace")) > 103:
         return 2
     if any(char in workspace_id for char in "\t\r\n"):
         return 2
