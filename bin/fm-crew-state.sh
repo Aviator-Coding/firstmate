@@ -420,8 +420,14 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     case "$run_status" in completed|failed|cancelled) axi_terminal=1 ;; esac
     BRANCH_SYNC_STATE=$(fm_nm_branch_sync_state "$RUN_OUT")
     bs_pipe=$(fm_nm_branch_sync_pipeline_status "$RUN_OUT")
+    # A terminated pipeline.status is authoritative over branch_sync.state:
+    # a cancelled/failed/completed pipeline run can still leave
+    # branch_sync.state=pipeline_owned stale (e.g. next_action recover_custody),
+    # and that must not be read as proof the run is still live.
+    bs_pipe_terminal=0
+    case "$bs_pipe" in completed|failed|cancelled) bs_pipe_terminal=1 ;; esac
     pipeline_active=0
-    if [ "$BRANCH_SYNC_STATE" = pipeline_owned ] || fm_nm_status_is_active "$bs_pipe"; then
+    if [ "$bs_pipe_terminal" != 1 ] && { [ "$BRANCH_SYNC_STATE" = pipeline_owned ] || fm_nm_status_is_active "$bs_pipe"; }; then
       pipeline_active=1
     fi
 
@@ -429,11 +435,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     newest_match=""
     # Consult the newest-on-branch listing when axi status is not already a
     # same-branch, head-matched, non-terminal run. An empty/timed-out primary
-    # call still skips this second lookup so we do not double the wait.
-    if [ "$head_ok" != 1 ] || [ "$axi_terminal" = 1 ]; then
+    # call still skips this second lookup so we do not double the wait. Also
+    # skip it when the pipeline-owned branch-sync path already wins outright
+    # (unmatched head, still-active pipeline): its result would be discarded.
+    if { [ "$head_ok" != 1 ] || [ "$axi_terminal" = 1 ]; } \
+      && ! { [ "$head_ok" != 1 ] && [ "$same_branch" = 1 ] && [ "$pipeline_active" = 1 ]; }; then
       newest=$(nm_newest_run_for_branch "$CREW_BRANCH")
-      newest_status=""
-      newest_match=""
       if [ -n "$newest" ]; then
         IFS=$'\t' read -r newest_status newest_match <<< "$newest"
       fi
@@ -575,10 +582,12 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
-  # stale: the gate resolved and the run resumed or finished.
+  # stale: the gate resolved and the run resumed or finished. branch-sync has no
+  # step-level evidence to supersede with, so a genuinely open decision on that
+  # path must never be silently marked stale.
   case "$LOG_VERB" in
     needs-decision|blocked)
-      if [ "$RUN_STATE" != parked ]; then
+      if [ "$RUN_SOURCE" != branch-sync ] && [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else

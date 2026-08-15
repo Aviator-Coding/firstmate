@@ -53,9 +53,16 @@ fm_nm_strip_quotes() {
   fm_nm_trim "$s"
 }
 
-# Scalar value of a TOON key in captured `axi status` output $1.
+# Scalar value of a TOON key in captured `axi status` output $1, scoped to
+# exclude the branch_sync: block so a missing run-level key (e.g. head) can
+# never bind to the corresponding nested branch_sync key (e.g. local.head).
 fm_nm_field() {  # <toon-output> <key>
-  printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
+  printf '%s\n' "$1" | awk '
+    /^branch_sync:[[:space:]]*$/ {inb=1; next}
+    inb && /^[^[:space:]]/ {inb=0}
+    inb {next}
+    {print}
+  ' | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
 }
 
 # 0 if $1 is a non-terminal no-mistakes run/step status. Coarse `runs` rows

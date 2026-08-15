@@ -28,6 +28,11 @@
 #   (l) two runs on one branch: older terminal + newer active -> the newer run
 #   (m) pipeline-owned run whose head is not in the crew worktree -> branch_sync,
 #       never unknown and never an older matching-head failed run
+#   (n) cancelled branch_sync.pipeline.status is authoritative over a stale
+#       branch_sync.state=pipeline_owned -> never working
+#   (o) branch-sync (no step-level evidence) never supersedes a genuinely open
+#       needs-decision/blocked log
+#   (p) a missing run head never binds via branch_sync.local.head
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -346,7 +351,11 @@ EOF
 }
 
 # Active run whose head is not in the crew worktree (pipeline mirror commits),
-# plus the branch_sync object axi status emits for that worktree.
+# plus the branch_sync object axi status emits for that worktree. Nesting
+# verified against a real `no-mistakes axi status` sample captured on this
+# machine 2026-08-15 on the installed v1.48.0 (2ac3769): a top-level
+# `branch_sync:` block (empty value) with nested `state:`, `local:` (branch,
+# head, clean), `pipeline:` (with `status:` nested under it), and `next_action:`.
 run_running_pipeline_owned() {  # <branch> <run_head> <sync_state>
   cat <<EOF
 run:
@@ -369,6 +378,34 @@ branch_sync:
     run: "01NEW"
     status: running
     current_head: "$2"
+EOF
+}
+
+# A terminated pipeline run whose branch_sync.state is still stale
+# pipeline_owned (next_action recover_custody), same verified nesting as
+# run_running_pipeline_owned above. pipeline.status is the fresher signal and
+# must win over the stale top-level branch_sync.state.
+run_cancelled_pipeline_owned() {  # <branch> <run_head> <sync_state>
+  cat <<EOF
+run:
+  id: "01OLD"
+  branch: $1
+  status: completed
+  head: "$2"
+  pr: ""
+  findings: none
+outcome: cancelled
+branch_sync:
+  state: $3
+  local:
+    branch: $1
+    head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+    clean: true
+  pipeline:
+    run: "01OLD"
+    status: cancelled
+    current_head: "$2"
+  next_action: recover_custody
 EOF
 }
 
@@ -1424,6 +1461,73 @@ EOF
   pass "pipeline-owned unmatched head is not replaced by an older failed run"
 }
 
+# (n) A cancelled/failed pipeline run can leave branch_sync.state stale at
+# pipeline_owned (next_action recover_custody). pipeline.status is the fresher
+# terminal signal and must win: this must never report working.
+test_pipeline_owned_cancelled_not_working() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-cancelled)
+  make_repo_on_branch "$d/wt" fm/feat-cancelled
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancelled.meta" "window=fm:fm-feat-cancelled" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_cancelled_pipeline_owned fm/feat-cancelled cafebabedeadbeef pipeline_owned)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cancelled
+  out=$(run_crew_state "$d" feat-cancelled)
+  assert_not_contains "$out" "state: working" "cancelled pipeline-owned run must not report working"
+  assert_not_contains "$out" "branch_sync: pipeline_owned" "cancelled pipeline must not surface as a live branch_sync"
+  assert_contains "$out" "state: unknown" "cancelled pipeline falls through to no-source unknown"
+  pass "a cancelled branch_sync.pipeline.status is not treated as a live run"
+}
+
+# (o) A genuinely open needs-decision log plus a branch-sync-sourced run (no
+# step-level evidence) must not be silently marked superseded.
+test_branch_sync_does_not_supersede_open_decision() {
+  reset_fakes
+  local d out
+  d=$(new_case branch-sync-open-decision)
+  make_repo_on_branch "$d/wt" fm/feat-open-decision
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-open-decision.meta" "window=fm:fm-feat-open-decision" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: which auth flow?\n' > "$d/state/feat-open-decision.status"
+  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-open-decision cafebabedeadbeef pipeline_owned)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-open-decision
+  out=$(run_crew_state "$d" feat-open-decision)
+  assert_contains "$out" "state: working" "branch-sync unmatched head -> working"
+  assert_contains "$out" "branch_sync: pipeline_owned" "branch-sync detail present"
+  assert_not_contains "$out" "superseded" "branch-sync must not supersede a genuinely open decision"
+  pass "branch-sync does not supersede a crew's own open needs-decision"
+}
+
+# (p) A missing top-level run head must not fail open by binding to
+# branch_sync.local.head: that would grant step-table authority (RUN_SOURCE
+# full) to a run this worktree cannot actually verify.
+test_missing_run_head_not_bound_via_branch_sync_local_head() {
+  reset_fakes
+  local d out
+  d=$(new_case missing-head-branch-sync-present)
+  make_repo_on_branch "$d/wt" fm/feat-bs-head
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bs-head.meta" "window=fm:fm-feat-bs-head" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  # branch_sync.local.head equals the real worktree HEAD (FM_FAKE_RUN_HEAD);
+  # the top-level run head field is stripped to simulate it being absent.
+  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-bs-head cafebabedeadbeef pipeline_owned | grep -v '^  head:')"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-bs-head
+  out=$(run_crew_state "$d" feat-bs-head)
+  assert_contains "$out" "branch_sync: pipeline_owned" "missing head still falls to branch_sync detail"
+  assert_not_contains "$out" "validating (running)" "missing head must not bind to branch_sync.local.head for step semantics"
+  pass "missing run head is not bound via branch_sync.local.head"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1476,5 +1580,8 @@ test_missing_run_head_falls_back_to_current_state
 test_newer_active_run_not_shadowed_by_older_failed_same_branch
 test_pipeline_owned_unmatched_head_not_unknown
 test_pipeline_owned_unmatched_head_not_older_failed
+test_pipeline_owned_cancelled_not_working
+test_branch_sync_does_not_supersede_open_decision
+test_missing_run_head_not_bound_via_branch_sync_local_head
 
 echo "all fm-crew-state tests passed"
