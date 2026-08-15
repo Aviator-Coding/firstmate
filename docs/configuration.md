@@ -116,6 +116,15 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Stale-pane wedge escalation threshold (config/stale-escalate-secs / FM_STALE_ESCALATE_SECS)
+
+`FM_STALE_ESCALATE_SECS` (default 240) is how long an idle-but-provably-working pane must sit before the watcher escalates it as a possible wedge (`bin/fm-watch.sh`'s `wedge_timer_check`).
+It is env-only per session, so under Claude - where the Stop-hook auto-arm owns re-arming and always launches the watcher with no override of its own - a raised threshold could not previously be made to stick.
+`config/stale-escalate-secs` (local, gitignored) is the durable knob: one positive base-10 integer on its own line.
+Precedence is `FM_STALE_ESCALATE_SECS` (tests, one-off overrides), then the config file, then the built-in default; a missing, empty, or non-numeric file value falls through to the default rather than erroring.
+Before trusting the wall clock alone, the watcher also checks whether the pane's active no-mistakes run is still writing to its own step log under `NM_LOG_HOME` (`~/.no-mistakes/logs/<run_id>/`, override `FM_NM_LOG_HOME`) - see `active_run_log_fresh` in `bin/fm-watch.sh` for the freshness check and its real-CLI verification.
+A run whose log was touched within the same threshold window is treated as proven-alive and the timer resets instead of escalating, however long the pane itself has looked idle; a run whose log has gone cold still escalates as before.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
@@ -568,7 +577,8 @@ FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watche
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
+FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; overrides config/stale-escalate-secs; stale panes whose crew is not provably working surface immediately unless they declare the pause verb; see "Stale-pane wedge escalation threshold" above
+FM_NM_LOG_HOME=~/.no-mistakes/logs # override for the no-mistakes run-log directory active_run_log_fresh checks; see "Stale-pane wedge escalation threshold" above
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's latest state/<id>.turn-ended marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added

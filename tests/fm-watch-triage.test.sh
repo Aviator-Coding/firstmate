@@ -377,6 +377,41 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# crew_absorb_class's run-id side channel (CREW_ABSORB_RUN_ID / CREW_ABSORB_CLASS):
+# only visible to a caller that invokes the function DIRECTLY (never through
+# `$(...)`, which forks a subshell and discards both assignments) - bin/fm-watch.sh
+# relies on exactly this to persist the id for active_run_log_fresh without an
+# extra no-mistakes call.
+test_crew_absorb_class_run_id_side_channel() {
+  local dir fakebin
+  dir=$(make_case absorb-class-run-id); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running · run=01M02JM3PT40KWJVC3T4B3N26M'
+  crew_absorb_class a >/dev/null
+  [ "$CREW_ABSORB_CLASS" = working ] || fail "run-step verdict not classed working via the side channel"
+  [ "$CREW_ABSORB_RUN_ID" = "01M02JM3PT40KWJVC3T4B3N26M" ] || fail "run id not extracted from the run-step detail: got '$CREW_ABSORB_RUN_ID'"
+  # A pane-sourced working verdict has no run to check.
+  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  crew_absorb_class a >/dev/null
+  [ "$CREW_ABSORB_CLASS" = working ] || fail "pane verdict not classed working via the side channel"
+  [ -z "$CREW_ABSORB_RUN_ID" ] || fail "pane-sourced working carried a leftover run id: $CREW_ABSORB_RUN_ID"
+  # A run-step verdict with no run= token (older/foreign fm-crew-state.sh) degrades
+  # to no known run id rather than erroring.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  crew_absorb_class a >/dev/null
+  [ -z "$CREW_ABSORB_RUN_ID" ] || fail "run-step detail without a run= token fabricated a run id: $CREW_ABSORB_RUN_ID"
+  # A non-working verdict clears any run id left over from an earlier call.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · run=01LEFTOVER'
+  crew_absorb_class a >/dev/null
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  crew_absorb_class a >/dev/null
+  [ "$CREW_ABSORB_CLASS" = paused ] || fail "paused verdict not classed paused via the side channel"
+  [ -z "$CREW_ABSORB_RUN_ID" ] || fail "paused verdict retained a leftover run id from the prior working call: $CREW_ABSORB_RUN_ID"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_absorb_class's run-id side channel carries a run-step run id, only for a direct (non-subshelled) call"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -636,6 +671,85 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+# --- non-terminal stale, crew provably working AND its active run's own log is
+#     still fresh: never wedge-escalated, however long the pane itself has sat
+#     idle -----------------------------------------------------------------
+# Reproduces the 2026-08-14/15 finding: a worker driving a no-mistakes run has
+# an idle MODEL by design (it polls the pipeline), so its pane goes stale and
+# the wall-clock-only wedge timer above escalated it as a possible wedge every
+# STALE_ESCALATE_SECS even while the run was demonstrably alive - one pane
+# escalated four times in a row, reaching demand-deep-inspection, and was
+# healthy every time. active_run_log_fresh checks the run's own step log
+# (NM_LOG_HOME/<run_id>/<step>.log - shape verified against the real installed
+# no-mistakes CLI, v1.48.0, 2026-08-15) before trusting the pane timer: a log
+# still being written to is proof of life the wall clock cannot see.
+test_nonterminal_stale_fresh_run_log_never_escalates() {
+  local dir state fakebin nm_logs out capture_file window key pane_hash sig pid run_id
+  dir=$(make_case nonterminal-stale-fresh-log); state="$dir/state"; fakebin="$dir/fakebin"
+  nm_logs="$dir/nm-logs"; out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-quiet"
+  run_id="01M02JM3PT40KWJVC3T4B3N26M"
+  mkdir -p "$nm_logs/$run_id"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/quiet.meta"
+  printf 'working: still compiling\n' > "$state/quiet.status"
+  sig=$(seen_sig "$state/quiet.status"); printf '%s' "$sig" > "$state/.seen-quiet_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE="state: working · source: run-step · ci running · run=$run_id"
+
+  # Phase A: first sighting - absorbed, and the active run id is persisted for
+  # later polls to recheck cheaply (a stat, not another crew-state read).
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_NM_LOG_HOME="$nm_logs" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a fresh provably-working non-terminal stale (should absorb): $(cat "$out")"
+  fi
+  reap "$pid"
+  [ "$(cat "$state/.active-run-$key" 2>/dev/null || true)" = "$run_id" ] || fail "active run id was not persisted on first sighting"
+
+  # Phase B: backdate the idle timer past the threshold, as the pre-existing
+  # escalation test does - but the run's own log was JUST written to (age ~0s),
+  # well inside the threshold. Without the fix this escalates exactly like the
+  # sibling test above; with the fix it must not.
+  printf 'still validating\n' > "$nm_logs/$run_id/review.log"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_NM_LOG_HOME="$nm_logs" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher wedge-escalated a provably-working stale despite a log freshly written by the active run: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a fresh active-run log still produced a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a fresh active-run log still enqueued a wedge escalation"
+  [ -s "$state/.stale-since-$key" ] || fail "stale-since timer was removed instead of reset while the run log stayed fresh"
+  reap "$pid"
+
+  # Phase C (regression guard): once the run's log goes cold, escalation still
+  # fires as before - the fix must not silently suppress a genuinely wedged run
+  # forever just because a run id was once known.
+  touch -t 200001010000 "$nm_logs/$run_id/review.log"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_NM_LOG_HOME="$nm_logs" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not escalate once the active run's own log went cold"
+  grep -F "possible wedge" "$out" >/dev/null || fail "cold-log escalation did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a fresh active-run log overrides the wedge timer indefinitely; a cold one still escalates"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -2015,6 +2129,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_absorb_class_run_id_side_channel
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
@@ -2024,6 +2139,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_nonterminal_stale_fresh_run_log_never_escalates
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

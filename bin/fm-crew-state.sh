@@ -602,6 +602,17 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # Append the active run id for a working verdict whose RUN_OUT is known to be
+  # THIS branch's own run (full: the current-code-matched query; branch-sync:
+  # same_branch was required to reach that source) - never for coarse, whose
+  # RUN_OUT came from a DIFFERENT branch's query and would misattribute the id.
+  # bin/fm-watch.sh's active_run_log_fresh parses this token to cheaply recheck
+  # the run's own log freshness later without another no-mistakes call.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" != coarse ]; then
+    run_id=$(strip_quotes "$(nm_field id)")
+    [ -n "$run_id" ] && RUN_DETAIL="${RUN_DETAIL}${SEP}run=$run_id"
+  fi
+
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 

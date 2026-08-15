@@ -422,6 +422,7 @@ test_active_run_is_authoritative() {
   assert_contains "$out" "state: working" "active run -> working"
   assert_contains "$out" "source: run-step" "active run -> run-step source"
   assert_contains "$out" "validating (running)" "active run reports the step"
+  assert_contains "$out" "run=01RUN" "active run reports its own run id for a later cheap log-freshness recheck (bin/fm-watch.sh's active_run_log_fresh)"
   pass "active run-step is authoritative"
 }
 
@@ -780,6 +781,10 @@ EOF
   local out; out=$(run_crew_state "$d" feat-f)
   assert_contains "$out" "state: working" "this branch's own run attributed via the runs list"
   assert_contains "$out" "source: run-step" "runs-list-resolved run -> run-step source"
+  # Coarse attribution has no run id of its own - RUN_OUT still holds the OTHER
+  # branch's run (fm/other-crew), so a run= token here would misattribute that
+  # id to this crew. active_run_log_fresh simply gets no id to check.
+  assert_not_contains "$out" "run=" "coarse-sourced working must not carry another branch's run id"
   pass "cross-branch run is attributed via the real runs list"
 }
 

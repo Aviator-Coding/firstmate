@@ -683,18 +683,45 @@ signal_reason_is_actionable() {  # <file> ...
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
+#
+# Companion side-channel output, set as a side effect of the ONE read above -
+# no extra cost. CREW_ABSORB_CLASS mirrors the printed token; CREW_ABSORB_RUN_ID
+# is the active no-mistakes run id (fm-crew-state.sh's "run=<id>" detail token)
+# for a run-step-sourced working verdict, else empty. A caller that invokes this
+# function DIRECTLY (never through `$(...)`, which forks a subshell and
+# discards both assignments) can read either global right after the call - used
+# by bin/fm-watch.sh to persist the run id for a cheap, no-mistakes-free
+# log-freshness recheck later (active_run_log_fresh). Callers that only need
+# the printed token (the large majority) are unaffected either way.
+CREW_ABSORB_CLASS=""
+CREW_ABSORB_RUN_ID=""
+
 crew_absorb_class() {  # <id>
   local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
-  if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+  CREW_ABSORB_CLASS=none
+  CREW_ABSORB_RUN_ID=""
+  if [ -n "$id" ]; then
+    line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+    case "$line" in
+      state:*)
+        state=${line#state: }; state=${state%% *}
+        if [ "$state" = paused ]; then
+          CREW_ABSORB_CLASS=paused
+        elif [ "$state" = working ]; then
+          src=${line#*source: }; src=${src%% *}
+          case "$src" in
+            run-step)
+              CREW_ABSORB_CLASS=working
+              CREW_ABSORB_RUN_ID=$(printf '%s\n' "$line" | grep -oE 'run=[A-Za-z0-9]+' | tail -1)
+              CREW_ABSORB_RUN_ID=${CREW_ABSORB_RUN_ID#run=}
+              ;;
+            pane) CREW_ABSORB_CLASS=working ;;
+          esac
+        fi
+        ;;
+    esac
   fi
-  printf 'none'
+  printf '%s' "$CREW_ABSORB_CLASS"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

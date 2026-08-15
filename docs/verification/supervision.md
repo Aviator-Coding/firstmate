@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, turn-end, watcher-continuity, wedge-alarm, and active-run log-freshness guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -340,6 +340,73 @@ tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
+
+## Provably-working wedge escalation (active-run log freshness)
+
+The 2026-08-14/15 finding: a worker driving a no-mistakes run has an idle MODEL by design (it waits on the pipeline and polls), so its pane goes stale and `bin/fm-watch.sh`'s wall-clock-only wedge timer escalated it as a possible wedge every `FM_STALE_ESCALATE_SECS` even while the run was demonstrably alive - one pane escalated four times in a row, reaching demand-deep-inspection, and was healthy every time.
+`active_run_log_fresh` (`bin/fm-watch.sh`) fixes this by checking the pane's active no-mistakes run's own step log under `NM_LOG_HOME/<run_id>/` (default `~/.no-mistakes/logs/<run_id>/`) for a file modified within the same threshold, before trusting the pane timer alone.
+
+The run-id-and-log-directory shape this rests on was verified against the real installed CLI on 2026-08-15:
+
+```sh
+no-mistakes --version
+```
+
+```text
+no-mistakes version v1.48.0 (2ac3769) 2026-08-08T06:39:10Z
+```
+
+```sh
+no-mistakes axi status
+```
+
+```text
+run:
+  id: "01M02JM3PT40KWJVC3T4B3N26M"
+  branch: fm/fm-crew-state-unknown-during-pipeline-owned-run-v2
+  status: completed
+  head: 730acf76
+  pr: "https://github.com/Aviator-Coding/firstmate/pull/7"
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,1142
+    review,completed,0,978750
+    test,completed,0,274657
+    document,completed,0,132161
+    lint,completed,0,1680
+    push,completed,0,1819
+    pr,completed,0,30446
+    ci,completed,0,1046573
+outcome: passed
+```
+
+```sh
+find ~/.no-mistakes/logs -maxdepth 2 -type f
+```
+
+```text
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/lint.log
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/pr.log
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/test.log
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/push.log
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/rebase.log
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/review.log
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/intent.log
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/document.log
+/Users/coder/.no-mistakes/logs/01KZ3JSGY6DM80D9F2FBY8G4JT/ci.log
+```
+
+Confirms the shape `active_run_log_fresh` relies on: `axi status`'s TOON `id:` field names the run, and `~/.no-mistakes/logs/<that id>/` holds one `<step>.log` per pipeline step, present only for runs `active_run_log_fresh` would ever be asked to check (a run this crew's own `axi status` currently attributes as working).
+
+Behavioral coverage (portable, no live no-mistakes call - `FM_CREW_STATE_BIN` and `FM_NM_LOG_HOME` stub the crew-state verdict and the log directory, per the harness-dependent-check contract in `firstmate-coding-guidelines`):
+
+```sh
+tests/fm-watch-triage.test.sh
+```
+
+`test_nonterminal_stale_fresh_run_log_never_escalates` reproduced the finding (escalates without the fix, confirmed by temporarily disabling `active_run_log_fresh`'s call site and rerunning) and proves the fix: a run whose log was just written to is never wedge-escalated however long its pane has sat idle, while a run whose log has gone cold still escalates exactly as before.
+`test_crew_absorb_class_run_id_side_channel` covers the run-id extraction and the subshell-visibility contract (`CREW_ABSORB_CLASS`/`CREW_ABSORB_RUN_ID` are visible only to a caller that invokes `crew_absorb_class` directly, never through `$(...)`) that `bin/fm-crew-state.sh`'s `run=<id>` detail token and `bin/fm-watch.sh`'s classification call sites depend on.
 
 ## Wedge-alarm channels
 
