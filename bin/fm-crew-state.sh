@@ -20,14 +20,27 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch AND current code identity,
-#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#   2. Matching no-mistakes run for this crew's branch, preferring the newest
+#      run on that branch (from `axi status` plus the coarse `no-mistakes runs`
+#      listing). Never report a terminal outcome from a superseded run while a
+#      later run on the same branch is still active. Branch name alone is not
+#      enough: a historical run on a reused branch whose head was rewritten or
+#      diverged must not be attributed.
+#      A run's step table is authoritative only when its head equals the
+#      worktree HEAD, or the worktree HEAD is an ancestor of the run head
+#      (pipeline fix commits advanced the run on the same line of history).
+#      Local work that advanced past the run head, or diverged from it,
+#      invalidates step-level attribution.
+#      A current run can still exist when the head does not resolve in the
+#      crew worktree: the pipeline commits in its own mirror, so the crew copy
+#      legitimately lags. Distinguish that from "no run" by reading
+#      branch_sync (pipeline_owned, or a non-terminal pipeline.status) from
+#      the same `axi status` output, and report working with that
+#      branch_sync.state rather than unknown or an older same-branch
+#      terminal outcome. A terminal pipeline.status (completed/failed/cancelled)
+#      always wins over branch_sync.state=pipeline_owned: a cancelled run can
+#      still leave that state stale (e.g. next_action recover_custody), and
+#      must never be read as proof the run is still live.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -38,7 +51,9 @@
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
-#      agree, and are reported as parked.
+#      agree, and are reported as parked. Exception: a branch-sync source has no
+#      step-level evidence to supersede with, so a genuinely open decision on
+#      that path is never marked stale.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
@@ -74,10 +89,10 @@ META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
-# How many of the most recent `no-mistakes runs` rows the cross-branch fallback
-# (nm_runs_status_for_branch, below) scans. Generous enough to still find a
-# branch's own run on a busy multi-crew fleet without listing the entire
-# history every call.
+# How many of the most recent `no-mistakes runs` rows the newest-on-branch
+# lookup (nm_newest_run_for_branch, below) scans. Generous enough to still
+# find a branch's own run on a busy multi-crew fleet without listing the
+# entire history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
@@ -330,12 +345,13 @@ nm_ci_checks_state() {
 # oriented text - no run id, no JSON/TOON, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+# is exact). The first row for THIS branch is the newest run on that branch.
+# Prints "<status>\t<matched|unmatched>" for that row, or empty when the
+# branch has no run within FM_CREW_STATE_RUNS_LIMIT rows. Does not skip an
+# unmatched-head newest row to reach an older same-branch row: that older row
+# is superseded and must not become current state.
+nm_newest_run_for_branch() {  # <branch>
+  local branch=$1 out row st rest br sha match
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -349,12 +365,11 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
+      match=unmatched
+      if nm_coarse_head_matches_worktree "$sha"; then
+        match=matched
       fi
-      printf '%s' "$st"
+      printf '%s\t%s' "$st" "$match"
       return 0
     fi
   done <<< "$out"
@@ -382,33 +397,82 @@ nm_coarse_head_matches_worktree() {  # <short-sha>
 }
 
 HAVE_RUN=0
-# RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
-# $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
-# a bare status word came back from the runs-list fallback above, so the
-# run-step block below skips the TOON field parsing entirely for this crew.
+# RUN_SOURCE distinguishes how HAVE_RUN=1 was decided:
+#   full        - $RUN_OUT is this crew's current-code-matched axi status TOON
+#   coarse      - only a bare newest-on-branch status word from the runs list
+#   branch-sync - a current run exists on this branch but its head does not
+#                 match the worktree; report branch_sync, not step semantics
+#                 and not a superseded older run.
 RUN_SOURCE=full
 COARSE_STATUS=""
+BRANCH_SYNC_STATE=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
-    else
-      # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
-      # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
-      # primary call means the CLI itself did not respond, so retrying it
-      # immediately with a second bounded call would just double the wait
-      # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
+    run_status=$(strip_quotes "$(nm_field status)")
+    run_outcome=$(strip_quotes "$(nm_field outcome)")
+    same_branch=0
+    head_ok=0
+    axi_terminal=0
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      same_branch=1
+      nm_run_head_matches_worktree && head_ok=1
+    fi
+    case "$run_outcome" in passed|failed|cancelled|checks-passed) axi_terminal=1 ;; esac
+    case "$run_status" in completed|failed|cancelled) axi_terminal=1 ;; esac
+    BRANCH_SYNC_STATE=$(fm_nm_branch_sync_state "$RUN_OUT")
+    bs_pipe=$(fm_nm_branch_sync_pipeline_status "$RUN_OUT")
+    # A terminated pipeline.status is authoritative over branch_sync.state:
+    # a cancelled/failed/completed pipeline run can still leave
+    # branch_sync.state=pipeline_owned stale (e.g. next_action recover_custody),
+    # and that must not be read as proof the run is still live.
+    bs_pipe_terminal=0
+    case "$bs_pipe" in completed|failed|cancelled) bs_pipe_terminal=1 ;; esac
+    pipeline_active=0
+    if [ "$bs_pipe_terminal" != 1 ] && { [ "$BRANCH_SYNC_STATE" = pipeline_owned ] || fm_nm_status_is_active "$bs_pipe"; }; then
+      pipeline_active=1
+    fi
+
+    newest_status=""
+    newest_match=""
+    # Consult the newest-on-branch listing when axi status is not already a
+    # same-branch, head-matched, non-terminal run. An empty/timed-out primary
+    # call still skips this second lookup so we do not double the wait. Also
+    # skip it when the pipeline-owned branch-sync path already wins outright
+    # (unmatched head, still-active pipeline): its result would be discarded.
+    if { [ "$head_ok" != 1 ] || [ "$axi_terminal" = 1 ]; } \
+      && ! { [ "$head_ok" != 1 ] && [ "$same_branch" = 1 ] && [ "$pipeline_active" = 1 ]; }; then
+      newest=$(nm_newest_run_for_branch "$CREW_BRANCH")
+      if [ -n "$newest" ]; then
+        IFS=$'\t' read -r newest_status newest_match <<< "$newest"
       fi
+    fi
+    newest_active=0
+    fm_nm_status_is_active "$newest_status" && newest_active=1
+
+    if [ "$head_ok" = 1 ] && { [ "$axi_terminal" != 1 ] || [ "$newest_active" != 1 ]; }; then
+      HAVE_RUN=1
+      RUN_SOURCE=full
+    elif [ "$same_branch" = 1 ] && [ "$pipeline_active" = 1 ]; then
+      # Current pipeline-owned (or still-active) run whose head is not in
+      # this worktree. Do not fall through to an older matching-head run.
+      HAVE_RUN=1
+      RUN_SOURCE="branch-sync"
+    elif [ "$newest_active" = 1 ]; then
+      HAVE_RUN=1
+      if [ "$same_branch" = 1 ] && [ -n "$BRANCH_SYNC_STATE" ]; then
+        RUN_SOURCE="branch-sync"
+      else
+        RUN_SOURCE=coarse
+        COARSE_STATUS=$newest_status
+      fi
+    elif [ "$newest_match" = matched ] && [ -n "$newest_status" ]; then
+      HAVE_RUN=1
+      RUN_SOURCE=coarse
+      COARSE_STATUS=$newest_status
     fi
   fi
 fi
@@ -436,6 +500,14 @@ if [ "$HAVE_RUN" = 1 ]; then
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
+  elif [ "$RUN_SOURCE" = branch-sync ]; then
+    # Current run, unmatched head: existence is known, step table is not.
+    RUN_STATE=working
+    if [ -n "$BRANCH_SYNC_STATE" ]; then
+      RUN_DETAIL="branch_sync: $BRANCH_SYNC_STATE"
+    else
+      RUN_DETAIL="run on branch (head does not match worktree)"
+    fi
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
@@ -496,7 +568,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" != branch-sync ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
@@ -515,10 +587,12 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
-  # stale: the gate resolved and the run resumed or finished.
+  # stale: the gate resolved and the run resumed or finished. branch-sync has no
+  # step-level evidence to supersede with, so a genuinely open decision on that
+  # path must never be silently marked stale.
   case "$LOG_VERB" in
     needs-decision|blocked)
-      if [ "$RUN_STATE" != parked ]; then
+      if [ "$RUN_SOURCE" != branch-sync ] && [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else
