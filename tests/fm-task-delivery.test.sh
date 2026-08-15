@@ -207,7 +207,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   meta="$home/state/promote-d1.meta"
 
   write_scout_meta() {
-    printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+    printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\nworktree_released=/tmp/wt\n' > "$meta"
   }
 
   write_scout_meta
@@ -235,6 +235,9 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided approval posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
+  assert_grep 'worktree=/tmp/wt' "$meta" "promotion dropped the endpoint identity every lifecycle command validates"
+  assert_no_grep 'worktree_released=' "$meta" \
+    "promotion carried a stale worktree release marker onto the live ship record"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
