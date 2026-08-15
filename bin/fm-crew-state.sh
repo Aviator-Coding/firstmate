@@ -57,7 +57,11 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A trailing `working:`
+#      line after an exact idle busy verdict is also not current state: report
+#      unknown with the status text and the idle liveness verdict rather than
+#      working. kind=secondmate skips the busy check (idle pane is healthy) and
+#      still reads working: from the status log.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -629,6 +633,7 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
+BUSY_VERDICT=""
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
@@ -648,10 +653,18 @@ fi
 # `unknown` with the resolution note as `doing`. map_log_state is the single owner of
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
+# A trailing working: line is a phase EVENT, not proof the turn is live. After
+# an exact idle busy verdict, reporting it as current working hides a dead or
+# stopped agent behind a healthy-looking line (2026-08-12 sleep-kill). Keep the
+# status text and name the idle source instead.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    if [ "$LOG_STATE" = working ] && [ "${BUSY_VERDICT%% *}" = idle ]; then
+      emit unknown status-log "${LOG_LINE}${SEP}harness idle (${BUSY_VERDICT#* })"
+    else
+      emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    fi
   fi
 fi
 

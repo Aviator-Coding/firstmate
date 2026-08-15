@@ -16,6 +16,7 @@
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
+#       except a trailing working: line, which is not current state
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
 #   (i) kind=scout skips the run lookup                           -> pane/status-log
 #   (j) torn-down worktree / missing meta                         -> unknown/none
@@ -991,8 +992,43 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
     --source claude-hook --event stop
   local out; out=$(run_crew_state "$d" feat-herdr-stopped)
   assert_not_contains "$out" "source: pane" "an idle record must not read as busy"
-  assert_contains "$out" "source: status-log" "an idle record falls to the status log"
+  assert_not_contains "$out" "state: working" "an idle record must not promote a working: line to current state"
+  assert_contains "$out" "state: unknown" "idle + trailing working: is not current state"
+  assert_contains "$out" "source: status-log" "the status text remains visible"
+  assert_contains "$out" "harness idle (claude-hook)" "the idle record is named as the liveness verdict"
   pass "an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)"
+}
+
+# (g'') no run + idle semantic record + a trailing working: phase note must NOT
+# report state: working. That is the 2026-08-12 sleep-kill gap: the last status
+# line is a legitimate working: note written moments before the agent died, the
+# pane is still readable (idle composer / end-of-turn banner), and the
+# harness-owned busy record already says idle. Reporting the status-log verb as
+# current state hides a dead agent indefinitely. Keep the status text and name
+# the idle liveness verdict instead.
+test_idle_working_status_log_is_not_current_working() {
+  reset_fakes
+  local d; d=$(new_case idle-working-log)
+  make_repo_on_branch "$d/wt" fm/feat-idle-working
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-idle-working.meta" "window=fm:fm-feat-idle-working" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing after setup, about to die on sleep\n' \
+    > "$d/state/feat-idle-working.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-idle-working
+  local out; out=$(run_crew_state "$d" feat-idle-working)
+  assert_not_contains "$out" "state: working" \
+    "an idle agent must not report working from a stale working: status line"
+  assert_contains "$out" "state: unknown" "idle + trailing working: is not current state"
+  assert_contains "$out" "source: status-log" "the status text remains visible"
+  assert_contains "$out" "working: implementing after setup, about to die on sleep" \
+    "the status text is preserved in the detail"
+  assert_contains "$out" "harness idle (claude-hook)" \
+    "the idle liveness verdict is named next to the status text"
+  pass "no run + idle record + trailing working: is not current working state"
 }
 
 # (g) no run + idle pane -> the status-log verb, as-is
@@ -1314,7 +1350,9 @@ test_historical_same_branch_rewritten_head_not_current() {
   assert_not_contains "$out" "source: run-step" "historical rewritten head must not use run-step"
   assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
   assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
-  assert_contains "$out" "state: working" "status-log working: remains current"
+  assert_not_contains "$out" "state: working" "idle + trailing working: is not current state"
+  assert_contains "$out" "state: unknown" "status-log working: after idle is not current working"
+  assert_contains "$out" "harness idle (claude-hook)" "the idle liveness verdict is named"
   pass "historical same-branch rewritten head is not attributed as current"
 }
 
@@ -1358,7 +1396,9 @@ test_local_advanced_past_run_head_invalidates() {
   out=$(run_crew_state "$d" adv)
   assert_not_contains "$out" "source: run-step" "local-advanced tip must not use historical run"
   assert_contains "$out" "source: status-log" "falls back after local advanced past run"
-  assert_contains "$out" "state: working" "status-log working: is current"
+  assert_not_contains "$out" "state: working" "idle + trailing working: is not current state"
+  assert_contains "$out" "state: unknown" "status-log working: after idle is not current working"
+  assert_contains "$out" "harness idle (claude-hook)" "the idle liveness verdict is named"
   pass "local work advanced past run head invalidates attribution"
 }
 
@@ -1377,7 +1417,9 @@ test_missing_run_head_falls_back_to_current_state() {
   out=$(run_crew_state "$d" no-head)
   assert_not_contains "$out" "source: run-step" "missing run head must not permit branch-only attribution"
   assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
-  assert_contains "$out" "state: working" "status-log remains current after missing run head"
+  assert_not_contains "$out" "state: working" "idle + trailing working: is not current state"
+  assert_contains "$out" "state: unknown" "status-log working: after idle is not current working"
+  assert_contains "$out" "harness idle (claude-hook)" "the idle liveness verdict is named"
   pass "missing run head falls back instead of matching by branch"
 }
 
@@ -1563,6 +1605,7 @@ test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
+test_idle_working_status_log_is_not_current_working
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused

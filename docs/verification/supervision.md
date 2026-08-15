@@ -176,6 +176,33 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+## Status-log `working:` after idle is not current state
+
+The 2026-08-12 finding: `bin/fm-crew-state.sh` reported `state: working · source: status-log` for a crew whose agent had been dead for ~50 minutes.
+The last status line was a legitimate `working:` phase note written moments before the agent died, the pane was still readable (idle composer and the harness end-of-turn banner), and the harness-owned busy record already said idle.
+Without an attributed run-step, that status-log verb became current state and hid the dead agent from status-based classification.
+
+`test_idle_working_status_log_is_not_current_working` in `tests/fm-crew-state.test.sh` reproduced the gap (failed before the change with the same `state: working · source: status-log` line) and now proves the fix.
+
+The same composition was verified against the real helper and a real tmux pane on 2026-08-15 (tmux 3.7b), isolated on a private socket so the host sessions were untouched.
+The fixture was: no attributed no-mistakes run, a readable idle pane, a `claude-hook` `stop` idle record, and a trailing `working: implementing the fix after setup` status line.
+
+```sh
+FM_HOME="$fixture_home" FM_STATE_OVERRIDE="$fixture_home/state" bin/fm-crew-state.sh dead-agent-repro
+```
+
+Observed after the fix:
+
+```text
+state: unknown · source: status-log · working: implementing the fix after setup · harness idle (claude-hook)
+```
+
+The same fixture before the change printed `state: working · source: status-log · implementing the fix after setup`.
+An idle pane plus `needs-decision:` still reported `state: parked · source: status-log`, and a busy `claude-hook` record plus the same `working:` line still reported `state: working · source: pane · harness busy (claude-hook)`.
+
+This composition is not harness-dependent: the busy record is already classified by `bin/fm-busy-lib.sh`.
+The portable regression pins the logic; the live tmux probe above is the real-tool confirmation that the helper consults that record when a status line is present.
+
 ## Turn-end guard
 
 The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
