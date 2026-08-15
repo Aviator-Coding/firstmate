@@ -419,6 +419,43 @@ teardown_task() {  # <id> <home>
     "$ROOT/bin/fm-teardown.sh" "$id" --force
 }
 
+# Stopping the lab session kills every task pane, and with it the `treehouse
+# get` subshell that holds that task's pool slot. Treehouse frees a slot as soon
+# as no live process sits in it, so every surviving record's worktree= is a
+# stale pointer at a directory the pool is free to hand to the next spawn - and
+# it does: the very next `treehouse get` after a restart takes the lowest freed
+# slot. fm-teardown.sh refuses before any mutation when another record still
+# claims a worktree it would release, so record that release on each surviving
+# pool record exactly as that refusal prescribes. A task that respawns
+# re-claims a slot and republishes its record without the marker, so only the
+# real current holder is left claiming each directory.
+# Secondmate records name their home, not a pool slot, so they are left alone.
+record_dropped_pool_claims() {
+  local state meta wt
+  for state in "$HOME_DIR/state" "$SECOND_HOME_A/state" "$SECOND_HOME_B/state"; do
+    [ -d "$state" ] || continue
+    for meta in "$state"/*.meta; do
+      [ -f "$meta" ] || continue
+      [ "$(grep '^kind=' "$meta" | cut -d= -f2-)" != secondmate ] || continue
+      ! grep -q '^worktree_released=' "$meta" || continue
+      wt=$(grep '^worktree=' "$meta" | cut -d= -f2-)
+      [ -n "$wt" ] || continue
+      printf 'worktree_released=%s\n' "$wt" >> "$meta"
+    done
+  done
+  return 0
+}
+
+restart_lab_session() {  # <case-name>
+  PATH="$HERDR_ORIGINAL_PATH" \
+    "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+    || fail "could not stop the isolated session for $1"
+  PATH="$HERDR_ORIGINAL_PATH" \
+    "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+    || fail "could not reprovision the isolated session for $1"
+  record_dropped_pool_claims
+}
+
 normalize_meta() {  # <meta>
   sed -E \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
@@ -1161,12 +1198,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     "└ $EXPECTED_CONCISE · p:"*) ;;
     *) fail "$RESTART_ID fresh projection label did not apply concise prefix handling: $OLD_RESTART_LABEL" ;;
   esac
-  PATH="$HERDR_ORIGINAL_PATH" \
-    "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-    || fail "could not stop the isolated session for $RESTART_ID validation"
-  PATH="$HERDR_ORIGINAL_PATH" \
-    "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-    || fail "could not reprovision the isolated session for $RESTART_ID validation"
+  restart_lab_session "$RESTART_ID validation"
   lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
     || fail "$RESTART_ID restart did not preserve the projected pane structurally"
   if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
@@ -1192,10 +1224,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   assert_focus_is "$RECLAIM_FOCUS" "$RESTART_ID same-identity reclaim"
 
   if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
-    PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-      || fail "could not stop the isolated session for idempotent reclaim"
-    PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-      || fail "could not reprovision the isolated session for idempotent reclaim"
+    restart_lab_session "idempotent reclaim"
     PRIOR_RESTART_WT=$NEW_RESTART_WT
     PRIOR_RESTART_PANE=$NEW_RESTART_PANE
     spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-idempotent.out" 2> "$TMP_ROOT/$RESTART_ID-idempotent.err" \
@@ -1235,10 +1264,7 @@ CROSS_BOUND_HOME=$(grep '^home=' "$SECOND_HOME_A/state/$CROSS_RESTART_ID.herdr-p
   || fail "cross-home restart journal did not bind the secondmate's exact home"
 [ ! -e "$HOME_DIR/state/$CROSS_RESTART_ID.herdr-presentation" ] \
   || fail "cross-home restart published a journal in the primary home"
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-  || fail "could not stop the isolated session for cross-home restart"
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-  || fail "could not reprovision the isolated session for cross-home restart"
+restart_lab_session "cross-home restart"
 spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/cross-restart-resume.out" 2> "$TMP_ROOT/cross-restart-resume.err" \
   || fail "cross-home same-identity reclaim failed: $(cat "$TMP_ROOT/cross-restart-resume.err")"
 CROSS_NEW_WT=$(remember_meta_worktree "$CROSS_RESTART_META")
@@ -1273,10 +1299,7 @@ PRIMARY_WAVE_WSID=$(grep '^herdr_workspace_id=' "$PRIMARY_WAVE_META" | cut -d= -
 BRAVO_WAVE_WSID=$(grep '^herdr_workspace_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
 PRIMARY_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
 BRAVO_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-  || fail "could not stop the isolated session for concurrent recovery"
-PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-  || fail "could not reprovision the isolated session for concurrent recovery"
+restart_lab_session "concurrent recovery"
 CONCURRENT_RECOVERY_FOCUS=$(focus_snapshot)
 spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
 PRIMARY_WAVE_PID=$!
