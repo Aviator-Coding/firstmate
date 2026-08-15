@@ -184,6 +184,37 @@ test_existing_crlf_agents_md_without_section_preserves_crlf() {
   pass "fm-ensure-agents-md.sh: CRLF injection preserves line endings idempotently"
 }
 
+# Project AGENTS.md is not a fleet corroboration surface. A worker that looks
+# there first for firstmate/crewmate/no-mistakes and finds silence should not
+# be handed a committed fleet mention; that check lives in the generated brief.
+test_created_and_updated_agents_md_do_not_inject_fleet_corroboration() {
+  local repo agents
+  repo="$TMP_ROOT/no-fleet-project"
+  mkdir -p "$repo"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed creating a skeleton"
+  agents="$repo/AGENTS.md"
+  assert_no_grep "firstmate" "$agents" "created AGENTS.md injected a firstmate mention"
+  assert_no_grep "crewmate" "$agents" "created AGENTS.md injected a crewmate mention"
+  assert_no_grep "fleet" "$agents" "created AGENTS.md injected a fleet mention"
+  assert_no_grep "no-mistakes" "$agents" "created AGENTS.md injected a no-mistakes mention"
+  assert_no_grep "axi" "$agents" "created AGENTS.md injected an axi mention"
+
+  repo="$TMP_ROOT/no-fleet-existing"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\nBuild with make.\n' > "$repo/AGENTS.md"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed updating an existing AGENTS.md"
+  agents="$repo/AGENTS.md"
+  assert_no_grep "firstmate" "$agents" "updated AGENTS.md injected a firstmate mention"
+  assert_no_grep "crewmate" "$agents" "updated AGENTS.md injected a crewmate mention"
+  assert_no_grep "fleet" "$agents" "updated AGENTS.md injected a fleet mention"
+  assert_no_grep "no-mistakes" "$agents" "updated AGENTS.md injected a no-mistakes mention"
+  assert_no_grep "axi" "$agents" "updated AGENTS.md injected an axi mention"
+  pass "fm-ensure-agents-md.sh: does not inject fleet corroboration into project AGENTS.md"
+}
+
 test_lowercase_agents_md_refuses_case_fragile_symlink() {
   local repo out rc
   repo="$TMP_ROOT/lowercase-project"
@@ -208,4 +239,5 @@ test_existing_agents_md_without_claude_gains_section_and_symlink
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
+test_created_and_updated_agents_md_do_not_inject_fleet_corroboration
 test_lowercase_agents_md_refuses_case_fragile_symlink

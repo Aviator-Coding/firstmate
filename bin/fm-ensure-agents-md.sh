@@ -7,6 +7,10 @@
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
+# Does not inject firstmate, crewmate, fleet, no-mistakes, or axi mentions.
+# Project AGENTS.md is project-intrinsic knowledge (AGENTS.md section 6);
+# fleet authenticity checks belong in the generated brief, not in committed
+# project memory. A project's silence about the fleet is not a defect.
 # Refuses a case-variant real memory file such as a lowercase agents.md, whose
 # CLAUDE.md symlink would carry an uppercase literal target that dangles on a
 # case-sensitive filesystem (issue #389).
