@@ -141,7 +141,75 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# A same-identity restart (`treehouse get` while this id already has meta)
+# that lands on a worktree another retained record still names must mark that
+# leftover released, so teardown can tell it from a live double-claim.
+test_same_identity_restart_records_leftover_worktree_release() {
+  local rec id out status leftover
+  id=settle-reclaim-leftover-z3
+  leftover=anchor-leftover
+  rec=$(make_settle_case settle-reclaim-leftover "$id" 0)
+  read_settle_record "$rec"
+
+  fm_write_meta "$HOME_DIR/state/$leftover.meta" \
+    "window=firstmate:fm-$leftover" \
+    "endpoint_task_id=$leftover" \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  # Existing meta for this id is what makes the spawn a same-identity restart
+  # rather than a first launch of a new occupant.
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$HOME_DIR/prior-wt" \
+    "project=$PROJ_DIR" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "same-identity restart should succeed after taking the leftover slot"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "same-identity restart did not record the taken worktree"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$leftover.meta" \
+    "leftover record lost the worktree= identity the claim check and later lifecycle commands validate"
+  assert_grep "worktree_released=$WT_DIR" "$HOME_DIR/state/$leftover.meta" \
+    "same-identity restart did not mark the leftover claimant released"
+  pass "a same-identity restart records worktree_released= on a leftover claimant of the taken worktree"
+}
+
+# A first spawn of a different id that happens to land on a claimed worktree
+# must not stamp the other record released: that is a live double-claim.
+test_fresh_spawn_does_not_release_another_tasks_live_claim() {
+  local rec id out status leftover
+  id=settle-fresh-double-z4
+  leftover=live-anchor
+  rec=$(make_settle_case settle-fresh-double "$id" 0)
+  read_settle_record "$rec"
+
+  fm_write_meta "$HOME_DIR/state/$leftover.meta" \
+    "window=firstmate:fm-$leftover" \
+    "endpoint_task_id=$leftover" \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "fresh spawn should still record its own worktree"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "fresh spawn did not record the taken worktree"
+  assert_no_grep "worktree_released=" "$HOME_DIR/state/$leftover.meta" \
+    "fresh spawn of a new id marked another task's live claim released"
+  pass "a fresh spawn of a new id does not release another task's live worktree claim"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_same_identity_restart_records_leftover_worktree_release
+test_fresh_spawn_does_not_release_another_tasks_live_claim
 
 echo "# all fm-spawn-worktree-settle tests passed"
