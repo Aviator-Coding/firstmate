@@ -67,7 +67,9 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
+# (0.2.x) or "Esc:cancel" (1.0.x, live-verified against grok 1.0.4
+# (d846eb93d94d) [stable] - see fm-busy-lib.sh's fm_busy_grok_tail_busy header).
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -82,12 +84,12 @@
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Esc:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
-FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel|Esc:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]

@@ -342,10 +342,30 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+# Verified live against the real grok CLI, grok 1.0.4 (d846eb93d94d) [stable]:
+# a mid-turn footer reads "Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts"
+# and the idle footer reads "Shift+Tab:mode  │  Ctrl+x:shortcuts" (no
+# "Esc:cancel"). grok 0.2.x's "Ctrl+c:cancel" hint is gone in this build.
+test_grok_busy_regex_matches_the_current_cli_footer() {
+  local state out
+  state="$TMP_ROOT/gates/state-1_0_x"
+  mkdir -p "$state"
+  out=$(fm_busy_classify tmux fake:w grok gate-g1 "$state" \
+    '  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts')
+  [ "$out" = "busy grok-regex" ] \
+    || fail "grok 1.0.3+'s 'Esc:cancel' footer must classify busy, got '$out'"
+  out=$(fm_busy_classify tmux fake:w grok gate-g2 "$state" \
+    '  Shift+Tab:mode  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] \
+    || fail "grok's idle footer (no cancel hint) must classify idle, got '$out'"
+  pass "grok's busy regex matches both the 0.2.x and the current 1.0.x cancel hint"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
+test_grok_busy_regex_matches_the_current_cli_footer
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
