@@ -48,11 +48,17 @@
 # A Herdr close can still refuse after that lock is held (active tab, unknown
 # presence). Worktree return is irreversible, so every refusable Herdr close
 # and the post-close presence gate run BEFORE branch delete or treehouse
-# return. On a later failure after a successful return, teardown clears only
-# the released worktree= pointer and keeps the rest of the retained record.
-# Before any worktree mutation, teardown also refuses when another task's
-# meta already records the same worktree path, including after a prior
-# partial cleanup left a stale pointer at a slot the pool has reused.
+# return. On a later failure after a successful return, teardown appends
+# worktree_released=<path> to the retained record and keeps every other line,
+# worktree= included: that line is the endpoint identity every lifecycle
+# command validates, so it is never stripped. The marker is what stops a rerun
+# from returning the same slot twice and what tells the claim check below that
+# a record is retained rather than live. Forced secondmate child returns
+# record it the same way.
+# Before ANY mutation - including the forced secondmate child cleanup that
+# returns descendant worktrees to the same pool - teardown refuses when
+# another task's meta still records a worktree path this run would release,
+# scanning descendant secondmate home state dirs as well as its own.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, locks each
@@ -203,7 +209,7 @@ teardown_release_locks() {
   DESCENDANT_LOCK_PATHS=()
   if [ "$status" -ne 0 ] && [ "$WORKTREE_RELEASED" = 1 ] \
      && [ -n "${META:-}" ] && [ -f "$META" ]; then
-    teardown_clear_released_worktree_pointer "$META" "${WT:-}" || true
+    teardown_record_worktree_release "$META" "${WT:-}" || true
   fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
@@ -2170,35 +2176,108 @@ teardown_worktree_paths_match() {  # <path-a> <path-b>
   [ -n "$a_real" ] && [ "$a_real" = "$b_real" ]
 }
 
-# Refuse before any worktree mutation when another task already records this
-# isolated copy. --force does not override this: discard authority is for this
-# task's own work, not another live task's branch.
-teardown_refuse_if_worktree_claimed_elsewhere() {
-  local meta other other_wt
-  [ -n "$WT" ] || return 0
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    other=$(basename "$meta" .meta)
-    [ "$other" != "$ID" ] || continue
-    other_wt=$(fm_meta_get "$meta" worktree)
-    [ -n "$other_wt" ] || continue
-    if teardown_worktree_paths_match "$WT" "$other_wt"; then
-      echo "REFUSED: worktree $WT is also recorded for task $other; nothing was changed" >&2
-      return 1
-    fi
-  done
-  return 0
+# Record that <worktree> was returned to the pool while <meta> is retained.
+# `worktree=` deliberately stays intact: it is the task's endpoint identity and
+# fm_backend_validate_task_endpoint refuses any record without it, so stripping
+# it would brick every later teardown, control, and spawn call for the task.
+# The separate marker is what tells a teardown rerun - and the cross-task claim
+# check below - that the recorded path is no longer an isolated copy this task
+# owns. Writes are chained end to end: a truncated or unmoved rewrite reports
+# failure rather than claiming a release that was never durably recorded.
+teardown_record_worktree_release() {  # <meta> <worktree>
+  local meta=$1 wt=$2 tmp rc=0
+  [ -f "$meta" ] && [ -n "$wt" ] || return 0
+  tmp="$meta.tmp.$$"
+  grep -v '^worktree_released=' "$meta" > "$tmp" || rc=$?
+  if [ "$rc" -gt 1 ] \
+     || ! printf 'worktree_released=%s\n' "$wt" >> "$tmp" \
+     || ! mv -f -- "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    echo "error: could not record the return of $wt in $meta; that record still points at a worktree the pool may reassign - verify no other task owns $wt before rerunning teardown" >&2
+    return 1
+  fi
+  echo "teardown: recorded the return of $wt for $(basename "$meta" .meta); the isolated copy is no longer this task's and a rerun will not return it again" >&2
 }
 
-teardown_clear_released_worktree_pointer() {  # <meta> <worktree>
-  local meta=$1 wt=$2 tmp
-  [ -f "$meta" ] && [ -n "$wt" ] || return 0
-  grep -q '^worktree=' "$meta" || return 0
-  tmp="$meta.tmp.$$"
-  grep -v '^worktree=' "$meta" > "$tmp" || true
-  printf '%s\n' "# worktree pointer cleared after return of $wt; a later teardown step refused" >> "$tmp"
-  mv -f -- "$tmp" "$meta"
-  echo "teardown: cleared worktree= for $ID after returning $wt because a later step refused; the isolated copy is no longer this task's" >&2
+# True when <meta> already records <worktree> as returned to the pool.
+teardown_worktree_release_recorded() {  # <meta> <worktree>
+  local meta=$1 wt=$2 released
+  [ -f "$meta" ] && [ -n "$wt" ] || return 1
+  released=$(fm_meta_get "$meta" worktree_released)
+  [ -n "$released" ] || return 1
+  teardown_worktree_paths_match "$wt" "$released"
+}
+
+# Every task record reachable from <state-dir>, including those inside
+# descendant secondmate homes: crewmates under a secondmate home draw from the
+# same project treehouse pool, so a claim on a pool slot is invisible to a scan
+# of one state dir. Mirrors the descent in preflight_firstmate_home_herdr_children.
+TEARDOWN_META_SCAN=()
+teardown_collect_metas_recursive() {  # <state-dir> <depth>
+  local state_dir=$1 depth=$2 meta kind home wt
+  [ "$depth" -le 16 ] || return 0
+  [ -d "$state_dir" ] || return 0
+  for meta in "$state_dir"/*.meta; do
+    [ -f "$meta" ] || continue
+    TEARDOWN_META_SCAN+=("$meta")
+    kind=$(meta_value "$meta" kind)
+    [ "$kind" = secondmate ] || continue
+    wt=$(meta_value "$meta" worktree)
+    home=$(meta_value "$meta" home)
+    [ -n "$home" ] || home=$wt
+    [ -n "$home" ] || continue
+    teardown_collect_metas_recursive "$home/state" "$((depth + 1))"
+  done
+}
+
+# Refuse before any worktree mutation when another task already records an
+# isolated copy this teardown would release. Covers this task's own worktree
+# and - for a forced secondmate teardown, which returns every descendant
+# worktree through cleanup_firstmate_home_children - each child worktree too,
+# so a stale child pointer at a reused pool slot cannot release a live task's
+# work. --force does not override this: discard authority is for this task's
+# own work, not another live task's branch. A record that already carries
+# worktree_released= for the same path is a retained record, not a live claim,
+# on either side of the comparison.
+teardown_refuse_if_worktree_claimed_elsewhere() {
+  local owned_metas=() targets=() home target meta other other_wt i owned
+  TEARDOWN_META_SCAN=()
+  home=$HOME_PATH
+  [ -n "$home" ] || home=$WT
+  if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ] && [ -n "$home" ]; then
+    teardown_collect_metas_recursive "$home/state" 1
+  fi
+  owned_metas=("$META" ${TEARDOWN_META_SCAN[@]+"${TEARDOWN_META_SCAN[@]}"})
+  for meta in "${owned_metas[@]}"; do
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    teardown_worktree_release_recorded "$meta" "$other_wt" && continue
+    targets+=("$other_wt")
+  done
+  [ "${#targets[@]}" -gt 0 ] || return 0
+
+  TEARDOWN_META_SCAN=()
+  teardown_collect_metas_recursive "$STATE" 1
+  for meta in ${TEARDOWN_META_SCAN[@]+"${TEARDOWN_META_SCAN[@]}"}; do
+    owned=0
+    for i in "${owned_metas[@]}"; do
+      [ "$i" != "$meta" ] || { owned=1; break; }
+    done
+    [ "$owned" = 0 ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    teardown_worktree_release_recorded "$meta" "$other_wt" && continue
+    other=$(basename "$meta" .meta)
+    for target in "${targets[@]}"; do
+      teardown_worktree_paths_match "$target" "$other_wt" || continue
+      echo "REFUSED: worktree $target is also recorded for task $other; nothing was changed" >&2
+      echo "--force does not override this: discard authority covers this task's own work, not another task's isolated copy." >&2
+      echo "List every claimant with: grep -l \"^worktree=$target\$\" \"$STATE\"/*.meta and the same glob under each secondmate home's state/ directory." >&2
+      echo "Then confirm which claimant is dead and that its work already landed, and release only its claim by appending worktree_released=$target to that task's meta - its endpoint identity and the rest of its state stay intact - before rerunning teardown." >&2
+      return 1
+    done
+  done
+  return 0
 }
 
 teardown_herdr_close_and_confirm() {
@@ -2345,6 +2424,11 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+    elif [ -n "$child_wt" ] && [ -d "$child_wt" ] \
+         && teardown_worktree_release_recorded "$child_meta" "$child_wt"; then
+      # Already returned by an earlier forced run; the surviving directory may
+      # belong to whichever task the pool handed it to since.
+      echo "teardown: child worktree $child_wt was already returned to the pool by an earlier run; leaving it alone" >&2
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -2352,7 +2436,10 @@ cleanup_firstmate_home_children() {
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-          :
+          # Record the release before the steps below, any of which can refuse
+          # and leave this child's record in place: without the marker a rerun
+          # would return a pool slot that is no longer this child's.
+          teardown_record_worktree_release "$child_meta" "$child_wt" || return 1
         else
           child_return_rc=$?
           if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
@@ -2392,6 +2479,11 @@ remove_secondmate_registry_entry() {
 }
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
+
+# Runs ahead of every mutation in this script, including the forced secondmate
+# child cleanup below that returns descendant worktrees to the same pool, so
+# the refusal's "nothing was changed" holds on every path it can take.
+teardown_refuse_if_worktree_claimed_elsewhere || exit 1
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -2464,8 +2556,6 @@ if [ "$FORCE" != "--force" ] \
   fi
 fi
 
-teardown_refuse_if_worktree_claimed_elsewhere || exit 1
-
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -2497,10 +2587,16 @@ fi
 # can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
+# not by task-worktree cleanup. Nor for a path an earlier run already returned:
+# whatever now runs in that directory belongs to whichever task the pool handed
+# it to, so a rerun reaps only the per-task tasktmp it still owns.
 if [ "$KIND" != secondmate ]; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if teardown_worktree_release_recorded "$META" "$WT"; then
+    reap_task_worktree_processes worktree "" "$TASK_TMP"
+  else
+    conclude_task_no_mistakes_run "$WT"
+    reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  fi
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -2545,6 +2641,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ] \
+     && teardown_worktree_release_recorded "$META" "$WT"; then
+  # An earlier run already returned this path to the pool and recorded it. The
+  # directory that survives may now be another task's isolated copy, so neither
+  # its branch nor its contents are this teardown's to touch.
+  echo "teardown: worktree $WT was already returned to the pool by an earlier run of this teardown; leaving the isolated copy, its branch, and its contents alone" >&2
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then

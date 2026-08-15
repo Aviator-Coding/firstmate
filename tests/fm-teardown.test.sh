@@ -54,6 +54,10 @@
 #   (z) projected close refuses (captain's active tab)        -> REFUSE before return
 #   (aa) two metas name the same worktree                      -> REFUSE, directory untouched
 #   (ab) another task records a different worktree             -> ALLOW
+#   (ac) the other record already released its claim           -> ALLOW
+#   (ad) a crewmate under a secondmate home holds the claim    -> REFUSE
+#   (ae) a live task claims a forced secondmate's child slot   -> REFUSE before child cleanup
+#   (af) a step after the return fails, then teardown reruns   -> release recorded, no second return
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -2115,6 +2119,149 @@ test_teardown_allows_when_other_task_records_a_different_worktree() {
   pass "teardown still completes when another task records a different isolated copy"
 }
 
+test_teardown_allows_when_the_other_claim_is_already_released() {
+  local case_dir
+  case_dir=$(make_case released-claim-neighbor)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "finished work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  # A retained record that already returned this slot is not a live claim, so
+  # the symmetric refusal has a documented way out that leaves the dead task's
+  # endpoint identity and the rest of its state intact.
+  fm_write_meta "$case_dir/state/dead-task.meta" \
+    "window=firstmate:fm-dead-task" \
+    "endpoint_task_id=dead-task" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "worktree_released=$case_dir/wt"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "released-claim-neighbor: teardown refused against a claim the other task already released: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "released-claim-neighbor: teardown left the finished task's metadata"
+  assert_grep "worktree=$case_dir/wt" "$case_dir/state/dead-task.meta" \
+    "released-claim-neighbor: the released record lost the endpoint identity every lifecycle command validates"
+  pass "teardown proceeds when the other record already released its claim"
+}
+
+test_teardown_refuses_when_a_secondmate_home_child_records_the_same_worktree() {
+  local case_dir rc=0
+  case_dir=$(make_case subhome-duplicate-worktree)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "finished work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  install_logging_treehouse "$case_dir"
+  # A live crewmate under a secondmate home draws from the same project pool,
+  # so its claim has to be visible to a scan rooted at the firstmate state dir.
+  mkdir -p "$case_dir/mate-home/state"
+  fm_write_meta "$case_dir/state/mate-a.meta" \
+    "window=firstmate:fm-mate-a" \
+    "endpoint_task_id=mate-a" \
+    "worktree=$case_dir/mate-home" \
+    "project=$case_dir/project" \
+    "kind=secondmate" \
+    "home=$case_dir/mate-home" \
+    "mode=secondmate"
+  fm_write_meta "$case_dir/mate-home/state/crew-b.meta" \
+    "window=firstmate:fm-crew-b" \
+    "endpoint_task_id=crew-b" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "subhome-duplicate-worktree: teardown succeeded while a crewmate under a secondmate home recorded the same isolated copy"
+  assert_grep "crew-b" "$case_dir/stderr" \
+    "subhome-duplicate-worktree: the refusal did not name the crewmate inside the secondmate home"
+  assert_grep "worktree_released=" "$case_dir/stderr" \
+    "subhome-duplicate-worktree: the refusal gave the operator no way out"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "subhome-duplicate-worktree: teardown returned the crewmate's isolated copy: $(cat "$case_dir/treehouse.log")"
+  [ -d "$case_dir/wt" ] \
+    || fail "subhome-duplicate-worktree: teardown removed the shared isolated copy"
+  [ -e "$case_dir/mate-home/state/crew-b.meta" ] \
+    || fail "subhome-duplicate-worktree: teardown erased the crewmate's metadata"
+  pass "teardown refuses when a crewmate under a secondmate home records the same isolated copy"
+}
+
+test_forced_secondmate_teardown_refuses_a_claimed_child_worktree_before_cleanup() {
+  local case_dir home rc=0
+  case_dir=$(make_case forced-child-claim)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  install_logging_treehouse "$case_dir"
+  home="$case_dir/secondmate-home"
+  # A stale child pointer at a pool slot another live task now owns must refuse
+  # BEFORE the forced child cleanup returns anything.
+  fm_write_meta "$case_dir/state/rival.meta" \
+    "window=firstmate:fm-rival" \
+    "endpoint_task_id=rival" \
+    "worktree=$case_dir/child-a-wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "forced-child-claim: forced secondmate teardown succeeded while a live task recorded a child's isolated copy"
+  assert_grep "rival" "$case_dir/stderr" \
+    "forced-child-claim: the refusal did not name the task that records the child worktree"
+  assert_grep "child-a-wt" "$case_dir/stderr" \
+    "forced-child-claim: the refusal did not name the claimed child worktree"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "forced-child-claim: forced cleanup still returned a worktree: $(cat "$case_dir/treehouse.log")"
+  [ -d "$home" ] || fail "forced-child-claim: the refusal removed the secondmate home"
+  [ -e "$home/state/child-a.meta" ] \
+    || fail "forced-child-claim: the refusal erased the child's durable record"
+  [ -e "$home/state/child-b.meta" ] \
+    || fail "forced-child-claim: the refusal tore down an unclaimed sibling first"
+  [ -d "$case_dir/child-a-wt" ] \
+    || fail "forced-child-claim: the refusal removed the claimed child worktree"
+  pass "forced secondmate teardown refuses a claimed child worktree before any child cleanup"
+}
+
+test_teardown_records_release_and_rerun_does_not_return_twice() {
+  local case_dir rc=0
+  case_dir=$(make_case released-pointer-rerun)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "finished work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  install_logging_treehouse "$case_dir"
+  # An unreadable turn-end token makes the first cleanup step AFTER the return
+  # refuse - the exact shape that used to leave a stale worktree= pointer at a
+  # slot the pool is free to hand to another task.
+  : > "$case_dir/state/task-x1.grok-turnend-token"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "released-pointer-rerun: teardown reported success while a post-return step failed"
+  grep -q "return" "$case_dir/treehouse.log" \
+    || fail "released-pointer-rerun: the isolated copy was never returned, so the rerun path is untested"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "released-pointer-rerun: the post-return failure erased the retained record"
+  assert_grep "worktree=$case_dir/wt" "$case_dir/state/task-x1.meta" \
+    "released-pointer-rerun: the retained record lost the endpoint identity every lifecycle command validates"
+  assert_grep "worktree_released=$case_dir/wt" "$case_dir/state/task-x1.meta" \
+    "released-pointer-rerun: the return was not durably recorded"
+
+  # The rerun must validate, skip the already-returned slot, and finish.
+  rm -f "$case_dir/state/task-x1.grok-turnend-token"
+  : > "$case_dir/treehouse.log"
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "released-pointer-rerun: the rerun refused instead of finishing the retained cleanup: $(cat "$case_dir/stderr2")"
+  assert_not_contains "$(cat "$case_dir/stderr2")" "worktree identity" \
+    "released-pointer-rerun: the rerun failed endpoint validation on the retained record"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "released-pointer-rerun: the rerun returned the already-released isolated copy again: $(cat "$case_dir/treehouse.log")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "released-pointer-rerun: the rerun left the task record behind"
+  pass "a post-return failure records the release and the rerun finishes without returning the slot twice"
+}
+
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup() {
   local case_dir log closed restored
   case_dir=$(make_case herdr-projection-restore-failure)
@@ -2746,6 +2893,10 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_refuses_active_tab_before_returning_worktree
 test_teardown_refuses_when_another_task_records_the_same_worktree
 test_teardown_allows_when_other_task_records_a_different_worktree
+test_teardown_allows_when_the_other_claim_is_already_released
+test_teardown_refuses_when_a_secondmate_home_child_records_the_same_worktree
+test_forced_secondmate_teardown_refuses_a_claimed_child_worktree_before_cleanup
+test_teardown_records_release_and_rerun_does_not_return_twice
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
