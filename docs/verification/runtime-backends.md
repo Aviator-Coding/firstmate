@@ -403,6 +403,24 @@ The projected spawn in that run used the historical empty opt-in file, so a home
 One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 
+The same presentation suite ran again on 2026-08-15 against Herdr 0.8.0 protocol 19 on macOS aarch64 after the workspace-ordering miss on this machine:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+On the base branch the concurrent-order assertion failed with create-append order (`firstmate`, then the secondmate fixtures, then the projected children).
+`workspace.move` itself still reordered on that same 0.8.0 server when the herdr-reported socket path was used.
+The miss was firstmate expanding `~/.config/herdr` through `pwd -P` into a home-manager / Nix-store path longer than Darwin `sun_path` (103 usable bytes), so the mover's `connect(2)` failed and spawn left workers in Herdr's default order.
+After handing the mover an AF_UNIX-safe spelling, the same command completed with:
+
+```text
+ok - real Herdr lab: concurrent primary workers form one stable contiguous block without active workspace/tab drift
+ok - real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block
+ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session tripwire intact
+```
+
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
 
 ```sh
