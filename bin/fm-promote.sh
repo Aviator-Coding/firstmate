@@ -109,7 +109,7 @@ META_LOCK_HELD=1
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^worktree_released=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
