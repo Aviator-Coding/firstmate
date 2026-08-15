@@ -37,7 +37,10 @@
 #      branch_sync (pipeline_owned, or a non-terminal pipeline.status) from
 #      the same `axi status` output, and report working with that
 #      branch_sync.state rather than unknown or an older same-branch
-#      terminal outcome.
+#      terminal outcome. A terminal pipeline.status (completed/failed/cancelled)
+#      always wins over branch_sync.state=pipeline_owned: a cancelled run can
+#      still leave that state stale (e.g. next_action recover_custody), and
+#      must never be read as proof the run is still live.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -48,7 +51,9 @@
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
-#      agree, and are reported as parked.
+#      agree, and are reported as parked. Exception: a branch-sync source has no
+#      step-level evidence to supersede with, so a genuinely open decision on
+#      that path is never marked stale.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
