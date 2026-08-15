@@ -56,6 +56,9 @@
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
+# The liveness beacon state/.last-watcher-beat is rewritten on every beat with
+# this process's pid so an arm cannot treat a leftover fresh mtime as proof
+# that a new holder is watching.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -844,6 +847,9 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# Bind the beacon to this process as soon as ownership is public. A leftover
+# fresh mtime from a previous cycle must not make this launch look healthy.
+printf '%s\n' "$WATCHER_PID" > "$STATE/.last-watcher-beat"
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -869,8 +875,9 @@ while :; do
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # alive, and the pid contents name the process that just beat. Supervision
+  # scripts warn when this goes stale with tasks in flight.
+  printf '%s\n' "$WATCHER_PID" > "$STATE/.last-watcher-beat"
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery

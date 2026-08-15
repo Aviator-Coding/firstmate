@@ -39,6 +39,7 @@ record_live_watcher() {
   printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
   printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
+  printf '%s\n' "$pid" > "$home/state/.last-watcher-beat"
 }
 
 # These cases exercise the persistent-watcher model (a live pid is the real

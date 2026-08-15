@@ -169,7 +169,7 @@ test_guard_warnings() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  touch "$state/.last-watcher-beat"
+  publish_watcher_beat "$state" "$pid"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
@@ -473,7 +473,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  touch "$state/.last-watcher-beat"
+  publish_watcher_beat "$state" "$peer"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
   armpid=$!
   i=0
@@ -764,7 +764,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   done
   grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null \
     || fail "arm child did not stand down behind the peer watcher"
-  touch "$state/.last-watcher-beat"
+  publish_watcher_beat "$state" "$peer"
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break

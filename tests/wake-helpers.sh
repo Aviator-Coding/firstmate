@@ -266,6 +266,12 @@ wait_for_exit() {
   return 124
 }
 
+# Publish a pid-bound watcher beacon. Empty leftover files are no longer a
+# healthy beat, so fixtures that need fm_watcher_healthy must name the holder.
+publish_watcher_beat() {  # <state> <pid>
+  printf '%s\n' "$2" > "$1/.last-watcher-beat"
+}
+
 is_live_non_zombie() {
   local pid=$1 stat
   kill -0 "$pid" 2>/dev/null || return 1

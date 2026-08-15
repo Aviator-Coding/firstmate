@@ -960,7 +960,7 @@ record_live_watcher_fixture() {
   printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
   printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
-  touch "$home/state/.last-watcher-beat"
+  printf '%s\n' "$$" > "$home/state/.last-watcher-beat"
 }
 
 # A live secondmate home as a DETACHED worktree of the primary at <commit>, with
