@@ -599,9 +599,17 @@ fm_busy_muse_run_terminal() {  # <session-log> <run-id>
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
 # historical operator escape hatch.
+#
+# Grok's mid-turn cancel hint is "Ctrl+c:cancel" on grok 0.2.x and
+# "Esc:cancel" on grok 1.0.x; both are live-verified footer text (grok
+# 0.2.73 and grok 1.0.4 (d846eb93d94d) [stable], 2026-08-15). The idle bar
+# shows neither hint, only "Shift+Tab:mode │ Ctrl+x:shortcuts". This is the
+# ONLY signal fm_busy_classify's Grok arm reads; it is scoped to harness=grok
+# and never classifies another adapter. bin/fm-crew-state.sh's herdr-native
+# busy read is unaffected - only this rendered-tail fallback used it stale.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel|Esc:cancel}}"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the
