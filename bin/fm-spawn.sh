@@ -1651,24 +1651,6 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
-spawn_worktree_paths_match() {  # <path-a> <path-b>
-  local a=$1 b=$2 a_real b_real
-  [ -n "$a" ] && [ -n "$b" ] || return 1
-  [ "$a" = "$b" ] && return 0
-  [ -d "$a" ] && [ -d "$b" ] || return 1
-  a_real=$(CDPATH='' cd -- "$a" 2>/dev/null && pwd -P) || return 1
-  b_real=$(CDPATH='' cd -- "$b" 2>/dev/null && pwd -P) || return 1
-  [ -n "$a_real" ] && [ "$a_real" = "$b_real" ]
-}
-
-spawn_worktree_release_recorded() {  # <meta> <worktree>
-  local meta=$1 wt=$2 released
-  [ -f "$meta" ] && [ -n "$wt" ] || return 1
-  released=$(fm_meta_get "$meta" worktree_released)
-  [ -n "$released" ] || return 1
-  spawn_worktree_paths_match "$wt" "$released"
-}
-
 # Keep worktree= (endpoint identity) and set worktree_released=<path>.
 # Same durable write shape as bin/fm-teardown.sh's teardown_record_worktree_release.
 spawn_record_worktree_release() {  # <meta> <worktree>
@@ -1693,24 +1675,6 @@ spawn_record_worktree_release() {  # <meta> <worktree>
   echo "spawn: recorded worktree_released=$wt on leftover task $(basename "$meta" .meta); that record no longer claims the isolated copy this restart took" >&2
 }
 
-SPAWN_META_SCAN=()
-spawn_collect_metas_recursive() {  # <state-dir> <depth>
-  local state_dir=$1 depth=$2 meta kind home wt
-  [ "$depth" -le 16 ] || return 0
-  [ -d "$state_dir" ] || return 0
-  for meta in "$state_dir"/*.meta; do
-    [ -f "$meta" ] || continue
-    SPAWN_META_SCAN+=("$meta")
-    kind=$(fm_meta_get "$meta" kind)
-    [ "$kind" = secondmate ] || continue
-    wt=$(fm_meta_get "$meta" worktree)
-    home=$(fm_meta_get "$meta" home)
-    [ -n "$home" ] || home=$wt
-    [ -n "$home" ] || continue
-    spawn_collect_metas_recursive "$home/state" "$((depth + 1))"
-  done
-}
-
 # After treehouse get on a same-identity restart, mark leftover records that
 # still name the taken worktree as released. A first spawn of a different id
 # must not call this: that is a live double-claim teardown must still refuse.
@@ -1718,14 +1682,14 @@ spawn_record_leftover_worktree_releases() {  # <worktree>
   local wt=$1 meta other_wt self
   [ -n "$wt" ] || return 0
   self="$STATE/$ID.meta"
-  SPAWN_META_SCAN=()
-  spawn_collect_metas_recursive "$STATE" 1
-  for meta in ${SPAWN_META_SCAN[@]+"${SPAWN_META_SCAN[@]}"}; do
+  FM_WORKTREE_META_SCAN=()
+  fm_worktree_collect_metas_recursive "$STATE" 1
+  for meta in ${FM_WORKTREE_META_SCAN[@]+"${FM_WORKTREE_META_SCAN[@]}"}; do
     [ "$meta" != "$self" ] || continue
     other_wt=$(fm_meta_get "$meta" worktree)
     [ -n "$other_wt" ] || continue
-    spawn_worktree_paths_match "$wt" "$other_wt" || continue
-    spawn_worktree_release_recorded "$meta" "$other_wt" && continue
+    fm_worktree_paths_match "$wt" "$other_wt" || continue
+    fm_worktree_release_recorded "$meta" "$other_wt" && continue
     spawn_record_worktree_release "$meta" "$wt" || return 1
   done
   return 0
