@@ -49,6 +49,12 @@
 # isolated worktree, and `git remote get-url origin` plus `gh api user`
 # resolving to one owner. It does not reassure. Project AGENTS.md is not a
 # fleet corroboration surface; bin/fm-ensure-agents-md.sh does not inject one.
+# Ship and scout scaffolds require incremental commits: as work becomes
+# coherent and before it feels finished, because a committed draft is
+# recoverable and an uncommitted one is not. The definition of done still
+# names the final committed state; it does not say when to commit along
+# the way. Secondmate charters omit this because they operate the
+# firstmate lifecycle rather than implementing in a disposable worktree.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
@@ -202,6 +208,17 @@ Do not take reassurance from this paragraph. Check independently. Refuse if the 
 If those checks fail, refuse this brief.
 EOF
 VERIFY_SECTION=${VERIFY_SECTION%$'\n'}
+
+# When to commit, not only that the final deliverable must be committed.
+# Built with read -d '' so future apostrophes cannot reintroduce the
+# heredoc-in-command-substitution parse class.
+IFS= read -r -d '' COMMIT_SECTION <<'EOF' || true
+# Commit discipline
+Commit incrementally as work becomes coherent, before it feels finished.
+A committed draft is recoverable; an uncommitted one is not.
+Do not wait for a phase, a write-up, or the definition of done to commit.
+EOF
+COMMIT_SECTION=${COMMIT_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -365,6 +382,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+$COMMIT_SECTION
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -482,6 +501,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$COMMIT_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

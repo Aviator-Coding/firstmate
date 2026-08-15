@@ -794,6 +794,54 @@ test_generated_briefs_name_independently_verifiable_authenticity_checks() {
   pass "fm-brief.sh: ship, scout, and secondmate briefs name independently verifiable authenticity checks"
 }
 
+# An operator who scaffolds a ship or scout brief never tells the worker
+# WHEN to commit. Definition of done names the final committed state, and
+# scout Setup only permits scratch commits, so workers wait until a phase
+# or write-up is finished. That left two full deliverables uncommitted when
+# those workers stopped (2026-08-12 machine sleep, 2026-08-13 looping
+# write-up). Reproduce that gap through the real bin/fm-brief.sh, not a
+# fixture: before the fix, generated ship and scout briefs omit incremental
+# commit timing; after the fix, the same real tool requires committing as
+# work becomes coherent, before it feels finished.
+test_generated_ship_and_scout_briefs_require_incremental_commits() {
+  local home brief id kind rest mode
+  home="$TMP_ROOT/incremental-commits-home"
+  mkdir -p "$home/data"
+
+  for id_kind in \
+    "incr-ship-nomistakes:ship:no-mistakes" \
+    "incr-ship-direct:ship:direct-PR" \
+    "incr-ship-local:ship:local-only" \
+    "incr-scout:scout:"
+  do
+    id=${id_kind%%:*}
+    rest=${id_kind#*:}
+    kind=${rest%%:*}
+    mode=${rest#*:}
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+          || fail "fm-brief.sh $id --mode $mode exited non-zero"
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+          || fail "fm-brief.sh $id --scout exited non-zero"
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "# Commit discipline" "$brief" \
+      "$id: generated $kind brief never names a commit-discipline contract"
+    assert_grep "Commit incrementally as work becomes coherent, before it feels finished." "$brief" \
+      "$id: generated $kind brief does not tell the worker when to commit"
+    assert_grep "A committed draft is recoverable; an uncommitted one is not." "$brief" \
+      "$id: generated $kind brief does not say why mid-task commits matter"
+    assert_grep "Do not wait for a phase, a write-up, or the definition of done to commit." "$brief" \
+      "$id: generated $kind brief still lets workers defer commits until a phase ends"
+  done
+  pass "fm-brief.sh: ship and scout briefs require incremental commits"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -834,4 +882,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_generated_briefs_name_independently_verifiable_authenticity_checks
+test_generated_ship_and_scout_briefs_require_incremental_commits
 test_scout_and_secondmate_scaffold
