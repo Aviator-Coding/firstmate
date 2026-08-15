@@ -216,6 +216,7 @@ record_watcher_lock() {
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+  printf '%s\n' "$pid" > "$dir/state/.last-watcher-beat"
 }
 
 test_hook_silent_when_no_work_in_flight() {

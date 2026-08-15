@@ -146,6 +146,154 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   pass "watch-arm: a cycle that delivered no wake of its own still fails loudly"
 }
 
+# A lock-holding process that never writes a new beacon. Models a launched
+# watcher that published ownership and then died or wedged before beating.
+write_lock_only_watcher() {  # <dir>
+  local dir=$1
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+WATCH_LOCK="$STATE/.watch.lock"
+WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
+if ! fm_lock_try_acquire "$WATCH_LOCK"; then
+  echo "watcher: already running pid ${FM_LOCK_HELD_PID:-}"
+  exit 0
+fi
+printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
+printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+identity=$(fm_pid_identity "${BASHPID:-$$}" 2>/dev/null || true)
+printf '%s\n' "$identity" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# Deliberately never touch the liveness beacon.
+sleep 300
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+}
+
+# Real arm script plus its lock/identity library, pointed at the lock-only
+# watcher fixture so the confirm path is the production one.
+install_real_arm_with_lock_only_watcher() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/bin"
+  cp "$ROOT/bin/fm-watch-arm.sh" "$dir/bin/fm-watch-arm.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  write_lock_only_watcher "$dir"
+}
+
+test_arm_does_not_report_started_when_child_never_beats() {
+  local dir state armout armpid status i
+  dir=$(make_case arm-false-started-no-beat)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  install_real_arm_with_lock_only_watcher "$dir"
+  # Leftover fresh beacon from a previous cycle. Confirm must not treat that
+  # leftover mtime as proof the new child is beating.
+  touch "$state/.last-watcher-beat"
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_ARM_ATTACH_POLL=0.1 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$dir/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  armpid=$!
+  wait_for_exit "$armpid" 80
+  status=$?
+
+  ! grep -qF 'watcher: started' "$armout" \
+    || fail "arm reported started without a beating watcher: $(cat "$armout")"
+  ! grep -qE 'watcher: attached' "$armout" \
+    || fail "arm attached to a lock-only phantom: $(cat "$armout")"
+  grep -qF 'watcher: FAILED' "$armout" \
+    || fail "arm did not fail loudly when the child never beat: $(cat "$armout")"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "arm exited $status after a launch that never produced a beating watcher"
+  ! is_live_non_zombie "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" \
+    || fail "a failed confirm left a live lock-only phantom running"
+  pass "watch-arm: a child that never beats cannot be reported as started"
+}
+
+test_attached_arm_ignores_a_stale_delivery_record() {
+  local dir state fakebin out armout status seed_pid seed_identity
+  dir=$(make_case attached-stale-delivery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  seed_pid=$SEED_PID
+  seed_identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  [ -n "$seed_identity" ] || fail "seed watcher did not publish a lock identity"
+  # A leftover identity-bound row from an earlier cycle. Matching pid+identity
+  # alone must not make this new attach look successful.
+  printf '%s\t%s\t%s\n' "$seed_pid" "$seed_identity" \
+    'signal: planted-stale-delivery' >> "$state/.watch-deliveries.log"
+  start_attached_arm "$state" "$fakebin" "$armout" 1
+
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 120
+  status=$?
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" \
+    || fail "a stale delivery record made a silent cycle look successful: $(cat "$armout")"
+  ! grep -qF 'planted-stale-delivery' "$armout" \
+    || fail "attached arm replayed a pre-cycle delivery record: $(cat "$armout")"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "attached arm exited $status after accepting a stale delivery record"
+  pass "watch-arm: a stale delivery record cannot close an attached cycle as success"
+}
+
+test_plain_arm_does_not_attach_to_a_lock_only_phantom() {
+  local dir state armout armpid status i lock_pid
+  dir=$(make_case arm-plain-vs-restart-phantom)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  install_real_arm_with_lock_only_watcher "$dir"
+  touch "$state/.last-watcher-beat"
+
+  # A live lock holder with matching identity and a leftover fresh beacon is
+  # the attach-to-phantom pre-state. Plain arm currently reports success here
+  # while --restart replaces the holder with a real cycle.
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    "$dir/bin/fm-watch.sh" > "$dir/phantom.out" 2>&1 &
+  lock_pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+    || fail "lock-only phantom did not publish a lock"
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_ARM_ATTACH_POLL=0.1 \
+    "$dir/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  armpid=$!
+  wait_for_exit "$armpid" 80
+  status=$?
+  ! grep -qE 'watcher: (started|attached)' "$armout" \
+    || fail "plain arm claimed a lock-only phantom as a live cycle: $(cat "$armout")"
+  grep -qF 'watcher: FAILED' "$armout" \
+    || fail "plain arm did not fail a lock-only phantom: $(cat "$armout")"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "plain arm exited $status for a lock-only phantom"
+
+  # --restart must still be able to replace that phantom. After the confirm
+  # fix it kills or clears the holder and then fails the same way unless a
+  # real watcher beats; the property here is that plain arm is no longer the
+  # path that reports success for the dead cycle.
+  kill "$lock_pid" "$armpid" 2>/dev/null || true
+  wait "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "watch-arm: plain arm does not attach to a leftover-beacon lock-only phantom"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
+test_arm_does_not_report_started_when_child_never_beats
+test_attached_arm_ignores_a_stale_delivery_record
+test_plain_arm_does_not_attach_to_a_lock_only_phantom

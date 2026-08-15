@@ -170,6 +170,7 @@ record_watcher_lock() {
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+  printf '%s\n' "$pid" > "$dir/state/.last-watcher-beat"
 }
 
 # --- registration contract ----------------------------------------------------
@@ -354,7 +355,6 @@ test_actionable_close_with_live_successor_rewakes_once() {
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live successor for actionable close"
   record_watcher_lock "$dir" "$pid" "$identity"
-  touch "$dir/state/.last-watcher-beat"
 
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   write_arm_fixture "$dir" benign-live
@@ -445,7 +445,6 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for benign close"
   record_watcher_lock "$dir" "$pid" "$identity"
-  touch "$dir/state/.last-watcher-beat"
   printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
@@ -474,7 +473,6 @@ test_positive_recovery_budget_contention_preserves_episode() {
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for recovery contention"
   record_watcher_lock "$dir" "$pid" "$identity"
-  touch "$dir/state/.last-watcher-beat"
   printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
   : > "$dir/state/.claude-autoarm-failure-notified"
   sleep 60 &
@@ -575,6 +573,53 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+test_false_started_without_beating_watcher_advances_failure_epoch() {
+  local dir status out
+  dir=$(make_primary_dir "$TMP_ROOT/false-started-no-beat")
+  : > "$dir/state/task.meta"
+  cp "$ROOT/bin/fm-watch-arm.sh" "$dir/bin/fm-watch-arm.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+WATCH_LOCK="$STATE/.watch.lock"
+WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
+if ! fm_lock_try_acquire "$WATCH_LOCK"; then
+  echo "watcher: already running pid ${FM_LOCK_HELD_PID:-}"
+  exit 0
+fi
+printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
+printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+identity=$(fm_pid_identity "${BASHPID:-$$}" 2>/dev/null || true)
+printf '%s\n' "$identity" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+sleep 300
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+  touch "$dir/state/.last-watcher-beat"
+
+  # A launch that never beats must close as a typed failure so the hook can
+  # advance the failure episode. Bound confirm so the hook cannot sit in wait.
+  export FM_ARM_CONFIRM_TIMEOUT=2
+  export FM_ARM_ATTACH_POLL=0.1
+  out=$(run_autoarm "$dir" 2>/dev/null) || status=$?
+  status=${status:-0}
+  unset FM_ARM_CONFIRM_TIMEOUT FM_ARM_ATTACH_POLL
+
+  expect_code 2 "$status" "a started claim without a beating watcher must fail the auto-arm"
+  assert_contains "$out" "automatic supervision mechanism is broken" \
+    "false started success must emit the automatic-mechanism alarm"
+  [ "$(epoch_outcome "$dir")" = failed ] \
+    || fail "false started success must advance the failure epoch, got: $(epoch_outcome "$dir")"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" \
+    "false started success did not record a failure episode"
+  ! grep -qF 'watcher: started' "$dir"/state/.claude-autoarm-output.* 2>/dev/null \
+    || fail "auto-arm kept a started line for a child that never beat"
+  pass "auto-arm: a launch that never beats advances the failure epoch"
+}
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -597,3 +642,4 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_fm_lock_status_still_works_with_shared_lib
+test_false_started_without_beating_watcher_advances_failure_epoch

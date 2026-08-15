@@ -78,6 +78,29 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# The watcher writes its pid into the beacon on every beat. An empty leftover
+# file or a pid that does not name the lock holder is not proof this cycle is
+# beating, even when the leftover mtime is still inside grace.
+fm_watcher_beacon_pid() {
+  local beat=$1 pid
+  [ -f "$beat" ] || return 1
+  pid=$(head -n 1 "$beat" 2>/dev/null | tr -d '[:space:]')
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$pid"
+}
+
+fm_pid_running() {
+  local pid=$1 stat
+  fm_pid_alive "$pid" || return 1
+  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  case "$stat" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
@@ -97,17 +120,19 @@ fm_watcher_lock_matches_pid() {
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age beat_pid
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" || return 1
+  fm_pid_running "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
+  beat_pid=$(fm_watcher_beacon_pid "$beat") || return 1
+  [ "$beat_pid" = "$pid" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
@@ -116,14 +141,15 @@ fm_watcher_healthy() {
 }
 
 # fm_watcher_healthy above is the PID-STRICT primitive: true only when a live,
-# identity-matched watcher PROCESS holds this home's lock with a fresh beacon. The
-# arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
-# that - it decides whether to start, attach to, or replace a real watcher
-# process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# non-zombie, identity-matched watcher PROCESS holds this home's lock with a
+# fresh beacon that names that same pid. The arm layer (bin/fm-watch-arm.sh,
+# bin/fm-claude-stop-autoarm.sh) needs exactly that - it decides whether to
+# start, attach to, or replace a real watcher process, so a leftover beacon
+# must never satisfy it. bin/fm-turnend-guard.sh also keeps this strict check
+# because it fires at the turn boundary where the auto-arm brings a fresh
+# watcher up. The pull warning (bin/fm-guard.sh) fires mid-turn, where the
+# auto-arm model runs no watcher at all, so it wants a different, model-aware
+# question:
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:

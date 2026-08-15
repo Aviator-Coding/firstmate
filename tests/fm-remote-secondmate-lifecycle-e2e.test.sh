@@ -252,7 +252,7 @@ publish_healthy_watcher_identity() { # <state> <home> <watch-script>
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$watch" > "$state/.watch.lock/watcher-path"
-  touch "$state/.last-watcher-beat"
+  printf '%s\n' "$$" > "$state/.last-watcher-beat"
 }
 
 remote_env() {
