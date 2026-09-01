@@ -51,11 +51,15 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Completed-routed-work resolution and withdrawal verification date: 2026-08-31.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+Two further regressions cover the closing paths: a hold whose routed work reached Done before the decision was filed, and a hold withdrawn as registered in error.
+Each was run against the pre-change script first and failed there, the first with `fm-decision-hold: routed task sample-done-route is already done` and the second because no `withdraw` command existed, so neither passes vacuously.
+Both also pin the refusals that carry the safety property, including an absent routed task, completed work that was never blocked by the hold, a withdrawal with no written reason, `--routed-to` on a withdrawal, resolving a withdrawn hold, and withdrawing an answered one.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -70,6 +74,8 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - resolve closes a hold whose routed work already completed and keeps its routing refusals
+ok - withdraw closes a hold registered in error and stays distinct from a captain decision
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
@@ -90,6 +96,9 @@ all teardown safety cases passed
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=67 local_links=234
 
 $ git diff --check
 (no output)
