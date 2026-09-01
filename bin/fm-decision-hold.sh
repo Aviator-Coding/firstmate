@@ -8,7 +8,8 @@
 # routes dependent work. This script supplies deterministic identities, creates
 # and verifies structured tasks-axi captain holds, records completion attestation
 # in the originating task's metadata, and closes a hold only after a durable
-# decision record has been linked to existing dependent work.
+# close record is written: a captain decision linked to existing dependent work,
+# or a written withdrawal reason for a hold that should never have been asked.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
@@ -24,6 +25,7 @@
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#   fm-decision-hold.sh withdraw <origin-id> <decision-key> --reason-file <path>
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -33,10 +35,28 @@
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
-# `resolve` requires every --routed-to task to exist and to be blocked by the hold.
-# It writes the captain decision and routed identities into the hold body, clears
-# those dependency edges, and only then marks the hold Done. A failure before the
-# final step leaves the captain hold open.
+# A hold has exactly two closing paths. Both demand a durable record, both leave
+# the hold open when any step before the close fails, and both stay distinguishable
+# in the hold body so a later reader can tell an answered decision from one that
+# should never have been asked.
+#
+# `resolve` closes a hold the captain answered. It requires every --routed-to task
+# to exist and to be blocked by the hold. Routed work that has already completed
+# still resolves, because a finished dependency is stronger evidence the decision
+# was acted on than a pending one. It writes the captain decision and routed
+# identities into the hold body, clears those dependency edges, and only then marks
+# the hold Done.
+#
+# `withdraw` closes a hold that should never have been asked, such as a duplicate
+# registration or a choice already taken and executed elsewhere. Use it only when
+# there is no captain answer to record; use `resolve` whenever the captain decided,
+# including when its routed work is already finished. It requires --reason-file,
+# accepts no --routed-to because a withdrawn hold routed nothing, records the
+# reason and its digest in the hold body, and only then marks the hold Done.
+#
+# Both closing paths are idempotent. An exact retry re-verifies the recorded
+# identity and succeeds; a changed decision, routed-task set, or withdrawal reason
+# is rejected, as is withdrawing an answered hold or resolving a withdrawn one.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -192,7 +212,21 @@ verify_hold_resolved() {  # <hold-id>
   [ "$state" = "done" ] || return 1
   [ "$kind" = captain ] || return 1
   case "$body" in
-    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
+    '"Resolution recorded by fm-decision-hold.'*"Routed work:"*) return 0 ;;
+  esac
+  return 1
+}
+
+verify_hold_withdrawn() {  # <hold-id>
+  local id=$1 show state kind body
+  show=$(task_show "$id") || return 1
+  state=$(show_field "$show" state)
+  kind=$(show_field "$show" kind)
+  body=$(show_field "$show" body)
+  [ "$state" = "done" ] || return 1
+  [ "$kind" = captain ] || return 1
+  case "$body" in
+    '"Withdrawn by fm-decision-hold.'*"Withdrawal reason:"*) return 0 ;;
   esac
   return 1
 }
@@ -210,10 +244,11 @@ verify_hold_durable() {  # <hold-id>
   fi
   if [ "$state" = "done" ] && [ "$kind" = captain ]; then
     case "$body" in
-      *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
+      '"Resolution recorded by fm-decision-hold.'*"Routed work:"*) return 0 ;;
+      '"Withdrawn by fm-decision-hold.'*"Withdrawal reason:"*) return 0 ;;
     esac
   fi
-  fail "captain decision $id is neither actively held nor durably resolved"
+  fail "captain decision $id is neither actively held nor durably closed"
 }
 
 verify_resolution_identity() {
@@ -234,6 +269,51 @@ verify_resolution_identity() {
     || fail "captain hold $id records a different captain decision"
   [ "$recorded_routes" = "$routed_csv" ] \
     || fail "captain hold $id records different routed work"
+}
+
+verify_withdrawal_identity() {
+  local id=$1 hold_body=$2 reason_digest=$3 withdrawal_prefix withdrawal_fields recorded_digest
+  withdrawal_prefix='"Withdrawn by fm-decision-hold.\nReason digest: '
+  case "$hold_body" in
+    "$withdrawal_prefix"*) withdrawal_fields=${hold_body#"$withdrawal_prefix"} ;;
+    *) fail "captain hold $id has no retry identity record" ;;
+  esac
+  case "$withdrawal_fields" in
+    *'\n\nWithdrawal reason:'*) : ;;
+    *) fail "captain hold $id has an invalid retry identity record" ;;
+  esac
+  recorded_digest=${withdrawal_fields%%\\n*}
+  [ "$recorded_digest" = "$reason_digest" ] \
+    || fail "captain hold $id records a different withdrawal reason"
+}
+
+# After verify_hold_active: a prior close may have stored its durable record and
+# then failed before Done, leaving the hold queued with close text already in the
+# body. Exact retry re-verifies that identity; the opposite close path refuses.
+guard_queued_close_record() {
+  local id=$1 path=$2 hold_body=$3 digest=$4 routed_csv=${5:-}
+  case "$hold_body" in
+    '"Resolution recorded by fm-decision-hold.'*)
+      case "$path" in
+        resolve)
+          verify_resolution_identity "$id" "$hold_body" "$digest" "$routed_csv"
+          ;;
+        withdraw)
+          fail "captain hold $id already records a captain decision; withdrawal cannot replace it"
+          ;;
+      esac
+      ;;
+    '"Withdrawn by fm-decision-hold.'*)
+      case "$path" in
+        withdraw)
+          verify_withdrawal_identity "$id" "$hold_body" "$digest"
+          ;;
+        resolve)
+          fail "captain hold $id already records a withdrawal; resolve cannot replace it"
+          ;;
+      esac
+      ;;
+  esac
 }
 
 command_id() {
@@ -266,7 +346,12 @@ command_hold() {
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
-    [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
+    if [ "$state" = "done" ]; then
+      if verify_hold_withdrawn "$id"; then
+        fail "captain decision $id is already durably withdrawn; use a new decision key for a new decision"
+      fi
+      fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
+    fi
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
   else
@@ -389,7 +474,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked hold_show hold_body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -424,18 +509,13 @@ command_resolve() {
   verify_hold_active "$id"
   hold_show=$(task_show "$id")
   hold_body=$(show_field "$hold_show" body)
-  case "$hold_body" in
-    *"Resolution recorded by fm-decision-hold."*)
-      verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
-      resolution_recorded=1
-      ;;
-  esac
+  guard_queued_close_record "$id" resolve "$hold_body" "$decision_digest" "$routed_csv"
 
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
-    state=$(show_field "$show" state)
-    [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
-      || fail "routed task $dep is already done"
+    # A routed task that already completed still resolves. tasks-axi keeps its
+    # blocked-by edge after Done, so the routing evidence the close depends on
+    # survives, and finished dependent work proves the decision was acted on.
     # tasks-axi quotes multi-entry blocked_by as "a,b,c"; strip so edge ids match.
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
     blocked=${blocked#\"}
@@ -474,12 +554,58 @@ command_resolve() {
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 
+command_withdraw() {
+  local origin=${1:-} key=${2:-} reason_file='' id='' reason='' reason_digest='' body='' hold_show hold_body
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --reason-file) shift; reason_file=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  [ -n "$reason_file" ] || fail "--reason-file is required"
+  [ -f "$reason_file" ] || fail "withdrawal reason file does not exist: $reason_file"
+  reason=$(cat "$reason_file")
+  [ -n "$reason" ] || fail "withdrawal reason file must not be empty"
+  [ "$(printf '%s' "$reason" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
+    || fail "withdrawal reason file exceeds 8192 bytes"
+  reason_digest=$(sha256_text "$reason")
+  require_tasks_axi
+  id=$(hold_id "$origin" "$key")
+  if verify_hold_withdrawn "$id"; then
+    hold_show=$(task_show "$id")
+    hold_body=$(show_field "$hold_show" body)
+    verify_withdrawal_identity "$id" "$hold_body" "$reason_digest"
+    printf 'withdrawn: %s\n' "$id"
+    return 0
+  fi
+  if verify_hold_resolved "$id"; then
+    fail "captain hold $id already records a captain decision; withdrawal cannot replace it"
+  fi
+  verify_hold_active "$id"
+  hold_show=$(task_show "$id")
+  hold_body=$(show_field "$hold_show" body)
+  guard_queued_close_record "$id" withdraw "$hold_body" "$reason_digest"
+  body=$(printf 'Withdrawn by fm-decision-hold.\nReason digest: %s\n\nWithdrawal reason:\n%s\n' \
+    "$reason_digest" "$reason")
+  tasks_axi update "$id" --body "$body" >/dev/null \
+    || fail "could not record the withdrawal reason on $id"
+  tasks_axi "done" "$id" >/dev/null || fail "could not close withdrawn captain hold $id"
+  verify_hold_withdrawn "$id" || fail "captain hold $id did not retain its durable withdrawal record"
+  printf 'withdrawn: %s\n' "$id"
+}
+
 case "${1:-}" in
   id) shift; command_id "$@" ;;
   hold) shift; command_hold "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   resolve) shift; command_resolve "$@" ;;
+  withdraw) shift; command_withdraw "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
