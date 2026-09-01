@@ -670,7 +670,7 @@ test_withdraw_closes_a_hold_registered_in_error() {
   fi
   set +e
   run_decisions "$home" withdraw "$origin" duplicate --reason-file "$home/empty-reason.txt" \
-    --routed-to sample-done-route > "$home/routed-withdraw.out" 2> "$home/routed-withdraw.err"
+    --routed-to sample-any-routed-task > "$home/routed-withdraw.out" 2> "$home/routed-withdraw.err"
   expect_code 2 "$?" "withdraw must reject --routed-to because a withdrawn hold routed nothing"
   set -e
   show=$(tasks_in "$home" show "$hold" --full)
