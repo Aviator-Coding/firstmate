@@ -8,7 +8,8 @@
 # routes dependent work. This script supplies deterministic identities, creates
 # and verifies structured tasks-axi captain holds, records completion attestation
 # in the originating task's metadata, and closes a hold only after a durable
-# decision record has been linked to existing dependent work.
+# close record is written: a captain decision linked to existing dependent work,
+# or a written withdrawal reason for a hold that should never have been asked.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity

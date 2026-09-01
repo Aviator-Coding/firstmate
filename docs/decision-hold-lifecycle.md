@@ -33,6 +33,8 @@ A failed intermediate step leaves the hold open.
 
 The `withdraw` subcommand closes a hold registered in error, accepts no routed work, and requires a reason file rather than a decision file.
 It records the reason and its digest under a `Withdrawn by fm-decision-hold.` marker that no resolution record carries, so a later reader can tell a withdrawn hold from an answered one, and marks the hold Done only after that write succeeds.
+Close-record detection matches those canonical body prefixes only, so free-text phrases that merely mention resolution or withdrawal do not count as a durable close record.
+When a prior close wrote its record and then failed before Done, an exact retry re-verifies that identity on the same path, while the opposite path refuses so a partial resolution cannot become a withdrawal and a partial withdrawal cannot become a resolution.
 `complete` and `verify` accept a withdrawn hold as durably closed, `hold` refuses to reopen its identity, `resolve` refuses a withdrawn hold, and `withdraw` refuses one that already records a captain decision.
 
 ## Structured read surfaces
@@ -59,6 +61,7 @@ A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so 
 Two further regressions cover the closing paths: a hold whose routed work reached Done before the decision was filed, and a hold withdrawn as registered in error.
 Each was run against the pre-change script first and failed there, the first with `fm-decision-hold: routed task sample-done-route is already done` and the second because no `withdraw` command existed, so neither passes vacuously.
 Both also pin the refusals that carry the safety property, including an absent routed task, completed work that was never blocked by the hold, a withdrawal with no written reason, `--routed-to` on a withdrawal, resolving a withdrawn hold, and withdrawing an answered one.
+Two review regressions pin the partial-close identity gate on both paths and the canonical-prefix close-marker classification that keeps free-text phrases from counting as a close record.
 
 The final verification commands and their exact summarized outputs follow.
 `bin/fm-test-run.sh` owns complete-inventory enforcement in CI, so the whole suite is not recopied here.
@@ -76,6 +79,8 @@ ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 ok - resolve closes a hold whose routed work already completed and keeps its routing refusals
 ok - withdraw closes a hold registered in error and stays distinct from a captain decision
+ok - partial close identity is stable across a done failure on both paths
+ok - queued close markers ignore free-text phrases and keep cross-path refusals
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
