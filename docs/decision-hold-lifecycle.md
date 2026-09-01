@@ -11,7 +11,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
-It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
+It rejects an identity collision, a changed title, and attempts to reopen an identity already closed by a resolution or a withdrawal.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
@@ -23,10 +23,18 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
+A hold has two closing subcommands, and both demand a durable record before anything closes.
+
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
+Dependent work that has already reached Done still resolves, because tasks-axi preserves a completed task's `blocked-by` edge, so the routing evidence the close depends on survives the dependent work finishing before the decision is filed.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
+
+The `withdraw` subcommand closes a hold registered in error, accepts no routed work, and requires a reason file rather than a decision file.
+It records the reason and its digest under a `Withdrawn by fm-decision-hold.` marker that no resolution record carries, so a later reader can tell a withdrawn hold from an answered one, and marks the hold Done only after that write succeeds.
+An exact retry is idempotent while a changed reason is rejected.
+`complete` and `verify` accept a withdrawn hold as durably closed, `hold` refuses to reopen its identity, `resolve` refuses a withdrawn hold, and `withdraw` refuses one that already records a captain decision.
 
 ## Structured read surfaces
 
