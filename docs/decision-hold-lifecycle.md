@@ -33,7 +33,6 @@ A failed intermediate step leaves the hold open.
 
 The `withdraw` subcommand closes a hold registered in error, accepts no routed work, and requires a reason file rather than a decision file.
 It records the reason and its digest under a `Withdrawn by fm-decision-hold.` marker that no resolution record carries, so a later reader can tell a withdrawn hold from an answered one, and marks the hold Done only after that write succeeds.
-An exact retry is idempotent while a changed reason is rejected.
 `complete` and `verify` accept a withdrawn hold as durably closed, `hold` refuses to reopen its identity, `resolve` refuses a withdrawn hold, and `withdraw` refuses one that already records a captain decision.
 
 ## Structured read surfaces
