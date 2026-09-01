@@ -550,6 +550,207 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Shape 1 of the stranded-hold gap: the captain answers, the dependent work is
+# dispatched, validated, merged and torn down inside one session, and the hold can
+# no longer close through its owner script. Completed dependent work that still
+# carries the hold's blocked-by edge is the strongest available evidence that the
+# decision was acted on, so it must resolve rather than refuse.
+test_resolve_closes_holds_whose_routed_work_completed() {
+  local home origin hold unrouted show json
+  home=$(make_home resolve-after-completion)
+  origin=sample-completed-route-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Completed route review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create completed-route origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Completed route review\n\nOne unresolved captain choice.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the completed route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the completed-route hold"
+
+  tasks_in "$home" add sample-done-route "Apply the chosen route" --kind ship --repo sample \
+    --blocked-by "$hold" >/dev/null || fail "could not create routed dependent work"
+  tasks_in "$home" "done" sample-done-route >/dev/null \
+    || fail "could not complete routed dependent work"
+  show=$(tasks_in "$home" show sample-done-route --full)
+  assert_contains "$show" "state: done" "routed work fixture must be complete"
+  assert_contains "$show" "blocked_by: $hold" \
+    "completed routed work must retain the durable routing edge the close depends on"
+
+  printf 'Take the north route.\n' > "$home/done-route-decision.txt"
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/done-route-decision.txt" \
+    --routed-to sample-done-route > "$home/done-route.out" 2> "$home/done-route.err" \
+    || fail "resolve refused a hold whose routed work had completed: $(cat "$home/done-route.err")"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "a hold with completed routed work did not close"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "the closed hold lost its durable decision record"
+  assert_contains "$show" "Routed work:" "the closed hold lost its routed identities"
+
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/done-route-decision.txt" \
+    --routed-to sample-done-route >/dev/null \
+    || fail "resolve against completed routed work was not idempotent on retry"
+  printf 'Take the south route.\n' > "$home/changed-done-route-decision.txt"
+  if run_decisions "$home" resolve "$origin" route \
+    --decision-file "$home/changed-done-route-decision.txt" --routed-to sample-done-route \
+    > "$home/done-drift.out" 2> "$home/done-drift.err"; then
+    fail "resolve accepted a different captain decision for completed routed work"
+  fi
+
+  json=$(run_bearings "$home") || fail "Bearings failed after resolving completed routed work"
+  printf '%s' "$json" | jq -e --arg hold "$hold" '
+    (.decisions_open | any(.id == $hold) | not)
+      and (.landed | any(.id == $hold) | not)
+  ' >/dev/null || fail "a closed hold still projected as an open captain decision: $json"
+
+  # Accepting completed dependent work must not weaken the refusals that carry the
+  # safety property: the routed task must exist and must be blocked by this hold.
+  unrouted=$(run_decisions "$home" hold "$origin" unrouted \
+    --title "Choose the unrouted option" --reason "captain unrouted choice pending" --repo sample) \
+    || fail "could not register the unrouted control hold"
+  if run_decisions "$home" resolve "$origin" unrouted --decision-file "$home/done-route-decision.txt" \
+    --routed-to sample-missing-route > "$home/missing-route.out" 2> "$home/missing-route.err"; then
+    fail "resolve accepted a routed task that does not exist"
+  fi
+  assert_grep "does not exist in the active home" "$home/missing-route.err" \
+    "an absent routed task must fail with the existence error"
+
+  tasks_in "$home" add sample-unrelated-done "Unrelated finished work" --kind ship --repo sample >/dev/null \
+    || fail "could not create unrelated finished work"
+  tasks_in "$home" "done" sample-unrelated-done >/dev/null \
+    || fail "could not complete unrelated work"
+  if run_decisions "$home" resolve "$origin" unrouted --decision-file "$home/done-route-decision.txt" \
+    --routed-to sample-unrelated-done > "$home/unrelated.out" 2> "$home/unrelated.err"; then
+    fail "completed work that was never blocked by the hold closed it"
+  fi
+  assert_grep "not durably blocked by" "$home/unrelated.err" \
+    "completed but unrouted work must fail with the durable-block error"
+  show=$(tasks_in "$home" show "$unrouted" --full)
+  assert_contains "$show" "state: queued" "a refused resolve must leave the hold open"
+  assert_contains "$show" "held: yes" "a refused resolve must leave the hold held"
+  pass "resolve closes a hold whose routed work already completed and keeps its routing refusals"
+}
+
+# Shape 2 of the stranded-hold gap: a hold registered in error, for a choice that
+# had already been taken and executed. There is no captain answer to record, so
+# resolve cannot close it and no supported path existed at all.
+test_withdraw_closes_a_hold_registered_in_error() {
+  local home origin hold answered show json
+  home=$(make_home withdraw-registered-in-error)
+  origin=sample-withdrawal-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Withdrawal review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create withdrawal origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Withdrawal review\n\nOne choice was registered in error.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" duplicate \
+    --title "Approve the already-executed cleanup" --reason "captain approval pending" --repo sample) \
+    || fail "could not register the withdrawal hold"
+
+  # A withdrawal needs a durable record exactly as a resolution needs a decision
+  # file, and none of these refusals may close the hold.
+  if run_decisions "$home" withdraw "$origin" duplicate \
+    > "$home/no-reason.out" 2> "$home/no-reason.err"; then
+    fail "withdraw closed a hold with no durable reason"
+  fi
+  assert_grep "--reason-file is required" "$home/no-reason.err" \
+    "withdraw without a reason must name the missing requirement"
+  if run_decisions "$home" withdraw "$origin" duplicate --reason-file "$home/absent-reason.txt" \
+    > "$home/absent-reason.out" 2> "$home/absent-reason.err"; then
+    fail "withdraw accepted a reason file that does not exist"
+  fi
+  : > "$home/empty-reason.txt"
+  if run_decisions "$home" withdraw "$origin" duplicate --reason-file "$home/empty-reason.txt" \
+    > "$home/empty-reason.out" 2> "$home/empty-reason.err"; then
+    fail "withdraw accepted an empty reason file"
+  fi
+  set +e
+  run_decisions "$home" withdraw "$origin" duplicate --reason-file "$home/empty-reason.txt" \
+    --routed-to sample-done-route > "$home/routed-withdraw.out" 2> "$home/routed-withdraw.err"
+  expect_code 2 "$?" "withdraw must reject --routed-to because a withdrawn hold routed nothing"
+  set -e
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "a refused withdrawal closed the hold"
+  assert_contains "$show" "held: yes" "a refused withdrawal released the hold"
+
+  printf 'Registered in error: this deletion was already approved and executed the same day.\n' \
+    > "$home/withdrawal-reason.txt"
+  run_decisions "$home" withdraw "$origin" duplicate --reason-file "$home/withdrawal-reason.txt" \
+    > "$home/withdraw.out" 2> "$home/withdraw.err" \
+    || fail "withdraw could not close a hold registered in error: $(cat "$home/withdraw.err")"
+  assert_grep "withdrawn: $hold" "$home/withdraw.out" "withdraw must report the closed identity"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "the withdrawn hold did not close"
+  assert_contains "$show" "Withdrawn by fm-decision-hold" "the withdrawn hold lost its durable record"
+  assert_contains "$show" "already approved and executed the same day" \
+    "the withdrawn hold lost the written reason"
+  assert_not_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "a withdrawal must stay distinguishable from a recorded captain decision"
+
+  run_decisions "$home" withdraw "$origin" duplicate --reason-file "$home/withdrawal-reason.txt" >/dev/null \
+    || fail "withdrawal was not idempotent on retry"
+  printf 'A different account of why this was withdrawn.\n' > "$home/changed-withdrawal-reason.txt"
+  if run_decisions "$home" withdraw "$origin" duplicate \
+    --reason-file "$home/changed-withdrawal-reason.txt" \
+    > "$home/withdraw-drift.out" 2> "$home/withdraw-drift.err"; then
+    fail "withdrawal retry accepted a different written reason"
+  fi
+
+  # A withdrawn hold is durably closed, not open work, and cannot be reopened or
+  # re-closed down the other path.
+  json=$(run_bearings "$home") || fail "Bearings failed after a withdrawal"
+  printf '%s' "$json" | jq -e --arg hold "$hold" '
+    (.decisions_open | any(.id == $hold) | not)
+      and (.landed | any(.id == $hold) | not)
+  ' >/dev/null || fail "a withdrawn hold still projected as an open captain decision: $json"
+  run_decisions "$home" complete "$origin" duplicate >/dev/null \
+    || fail "completion rejected a durably withdrawn decision key"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verification rejected a durably withdrawn decision key"
+  if run_decisions "$home" hold "$origin" duplicate \
+    --title "Approve the already-executed cleanup" --reason "captain approval pending" --repo sample \
+    > "$home/reopen.out" 2> "$home/reopen.err"; then
+    fail "a durably withdrawn decision key was reopened"
+  fi
+  assert_grep "already durably withdrawn" "$home/reopen.err" \
+    "reopening a withdrawn key must say it was withdrawn, not resolved"
+  tasks_in "$home" add sample-late-route "Late dependent work" --kind ship --repo sample \
+    --blocked-by "$hold" >/dev/null || fail "could not create late dependent work"
+  printf 'Take the late route.\n' > "$home/late-decision.txt"
+  if run_decisions "$home" resolve "$origin" duplicate --decision-file "$home/late-decision.txt" \
+    --routed-to sample-late-route > "$home/late-resolve.out" 2> "$home/late-resolve.err"; then
+    fail "resolve reopened and re-closed a durably withdrawn hold"
+  fi
+  assert_grep "is not queued" "$home/late-resolve.err" \
+    "resolving a withdrawn hold must fail the not-queued refusal"
+
+  # The reverse direction is refused too: a recorded captain decision may not be
+  # overwritten by a withdrawal.
+  answered=$(run_decisions "$home" hold "$origin" answered \
+    --title "Choose the answered option" --reason "captain answered choice pending" --repo sample) \
+    || fail "could not register the answered hold"
+  tasks_in "$home" add sample-answered-work "Apply the answered choice" --kind ship --repo sample \
+    --blocked-by "$answered" >/dev/null || fail "could not create answered dependent work"
+  printf 'Take the answered option.\n' > "$home/answered-decision.txt"
+  run_decisions "$home" resolve "$origin" answered --decision-file "$home/answered-decision.txt" \
+    --routed-to sample-answered-work >/dev/null \
+    || fail "could not resolve the answered hold"
+  if run_decisions "$home" withdraw "$origin" answered --reason-file "$home/withdrawal-reason.txt" \
+    > "$home/withdraw-answered.out" 2> "$home/withdraw-answered.err"; then
+    fail "withdrawal overwrote a recorded captain decision"
+  fi
+  assert_grep "already records a captain decision" "$home/withdraw-answered.err" \
+    "withdrawing an answered hold must name the recorded decision"
+  show=$(tasks_in "$home" show "$answered" --full)
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "a refused withdrawal damaged the recorded captain decision"
+  pass "withdraw closes a hold registered in error and stays distinct from a captain decision"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +761,5 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_resolve_closes_holds_whose_routed_work_completed
+test_withdraw_closes_a_hold_registered_in_error
