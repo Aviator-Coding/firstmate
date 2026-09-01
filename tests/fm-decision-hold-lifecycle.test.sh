@@ -933,6 +933,212 @@ EOF
   pass "partial close identity is stable across a done failure on both paths"
 }
 
+# Free text inside a decision or reason may quote the other path's marker sentence.
+# Classification must use the canonical recorded body prefix, not a substring match,
+# or an exact retry after a partial close would misroute and refuse identity re-verify.
+test_queued_close_markers_ignore_free_text_phrases() {
+  local home origin hold show
+
+  # Withdrawal reason quotes the resolution marker; exact retry must still close.
+  home=$(make_home marker-in-withdraw-reason)
+  origin=sample-marker-withdraw-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Marker withdraw review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create marker-withdraw origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Marker withdraw review\n\nOne hold registered in error.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken choice" --reason "registered in error" --repo sample) \
+    || fail "could not register the marker-withdraw hold"
+  printf 'Registered in error after someone wrote Resolution recorded by fm-decision-hold. in notes.\n' \
+    > "$home/marker-withdraw-reason.txt"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ ! -f "$FM_HOME/done-failed-once" ]; then
+  : > "$FM_HOME/done-failed-once"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/marker-withdraw-reason.txt" \
+    > "$home/marker-withdraw.out" 2> "$home/marker-withdraw.err"; then
+    fail "marker withdrawal succeeded after a forced done failure"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" \
+    "marker withdrawal closed the hold before done succeeded"
+  assert_contains "$show" "Withdrawn by fm-decision-hold" \
+    "marker withdrawal did not store its durable reason before done failed"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold." \
+    "marker withdrawal lost the quoted resolution phrase inside the reason"
+  run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/marker-withdraw-reason.txt" >/dev/null \
+    || fail "exact marker-withdraw retry refused a genuine withdrawal whose reason quotes the resolution marker"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "exact marker-withdraw retry left the hold open"
+  assert_contains "$show" "Withdrawn by fm-decision-hold" \
+    "exact marker-withdraw retry lost the withdrawal record"
+  assert_contains "$show" "someone wrote Resolution recorded by fm-decision-hold. in notes" \
+    "exact marker-withdraw retry lost the free-text reason"
+  run_decisions "$home" complete "$origin" mistaken >/dev/null \
+    || fail "completion rejected a withdrawn hold whose reason quotes the resolution marker"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verification rejected a withdrawn hold whose reason quotes the resolution marker"
+  if run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken choice" --reason "registered in error" --repo sample \
+    > "$home/marker-withdraw-reopen.out" 2> "$home/marker-withdraw-reopen.err"; then
+    fail "a withdrawn hold whose reason quotes the resolution marker was treated as unresolved"
+  fi
+  assert_grep "already durably withdrawn" "$home/marker-withdraw-reopen.err" \
+    "a done withdrawal with a resolution phrase in free text must still classify as withdrawn"
+
+  # Resolution decision quotes the withdrawal marker; exact retry must still close.
+  home=$(make_home marker-in-resolve-decision)
+  origin=sample-marker-resolve-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Marker resolve review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create marker-resolve origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Marker resolve review\n\nOne answered hold.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" answered \
+    --title "Choose the answered option" --reason "captain answer pending" --repo sample) \
+    || fail "could not register the marker-resolve hold"
+  tasks_in "$home" add sample-marker-resolve-work "Apply the answered choice" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create marker-resolve dependent work"
+  printf 'Take the answered option, and ignore any note saying Withdrawn by fm-decision-hold.\n' \
+    > "$home/marker-resolve-decision.txt"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ ! -f "$FM_HOME/done-failed-once" ]; then
+  : > "$FM_HOME/done-failed-once"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" resolve "$origin" answered \
+    --decision-file "$home/marker-resolve-decision.txt" \
+    --routed-to sample-marker-resolve-work \
+    > "$home/marker-resolve.out" 2> "$home/marker-resolve.err"; then
+    fail "marker resolution succeeded after a forced done failure"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" \
+    "marker resolution closed the hold before done succeeded"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "marker resolution did not store the captain decision before done failed"
+  assert_contains "$show" "Withdrawn by fm-decision-hold." \
+    "marker resolution lost the quoted withdrawal phrase inside the decision"
+  run_decisions "$home" resolve "$origin" answered \
+    --decision-file "$home/marker-resolve-decision.txt" \
+    --routed-to sample-marker-resolve-work >/dev/null \
+    || fail "exact marker-resolve retry refused a genuine resolution whose decision quotes the withdrawal marker"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "exact marker-resolve retry left the hold open"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "exact marker-resolve retry lost the resolution record"
+  assert_contains "$show" "ignore any note saying Withdrawn by fm-decision-hold." \
+    "exact marker-resolve retry lost the free-text decision"
+  run_decisions "$home" complete "$origin" answered >/dev/null \
+    || fail "completion rejected a resolved hold whose decision quotes the withdrawal marker"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verification rejected a resolved hold whose decision quotes the withdrawal marker"
+
+  # Ordinary cross-path refusals still hold so prefix classification is not a hole.
+  home=$(make_home marker-cross-path-refusals)
+  origin=sample-marker-cross-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Marker cross review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create marker-cross origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Marker cross review\n\nTwo ordinary partial closes.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" answered \
+    --title "Choose the answered option" --reason "captain answer pending" --repo sample) \
+    || fail "could not register the marker-cross resolution hold"
+  tasks_in "$home" add sample-marker-cross-work "Apply the answered choice" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create marker-cross dependent work"
+  printf 'Take the answered option.\n' > "$home/marker-cross-decision.txt"
+  printf 'Registered in error with ordinary text.\n' > "$home/marker-cross-reason.txt"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ ! -f "$FM_HOME/done-failed-once" ]; then
+  : > "$FM_HOME/done-failed-once"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" resolve "$origin" answered \
+    --decision-file "$home/marker-cross-decision.txt" \
+    --routed-to sample-marker-cross-work \
+    > "$home/marker-cross-resolve.out" 2> "$home/marker-cross-resolve.err"; then
+    fail "marker-cross resolution succeeded after a forced done failure"
+  fi
+  if run_decisions "$home" withdraw "$origin" answered \
+    --reason-file "$home/marker-cross-reason.txt" \
+    > "$home/marker-cross-withdraw.out" 2> "$home/marker-cross-withdraw.err"; then
+    fail "withdraw replaced an ordinary partially recorded captain decision"
+  fi
+  assert_grep "already records a captain decision" "$home/marker-cross-withdraw.err" \
+    "withdrawing an ordinary partial resolution must still be refused"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "Take the answered option." \
+    "ordinary cross-path withdraw damaged the captain decision"
+  assert_not_contains "$show" "Withdrawn by fm-decision-hold" \
+    "ordinary cross-path withdraw wrote a withdrawal over a partial resolution"
+  run_decisions "$home" resolve "$origin" answered \
+    --decision-file "$home/marker-cross-decision.txt" \
+    --routed-to sample-marker-cross-work >/dev/null \
+    || fail "ordinary partial-resolve retry did not close after the cross-path refusal"
+
+  hold=$(run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken choice" --reason "registered in error" --repo sample) \
+    || fail "could not register the marker-cross withdrawal hold"
+  tasks_in "$home" add sample-marker-cross-late "Late dependent work" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create marker-cross late work"
+  rm -f "$home/done-failed-once"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ ! -f "$FM_HOME/done-failed-once" ]; then
+  : > "$FM_HOME/done-failed-once"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/marker-cross-reason.txt" \
+    > "$home/marker-cross-withdraw2.out" 2> "$home/marker-cross-withdraw2.err"; then
+    fail "marker-cross withdrawal succeeded after a forced done failure"
+  fi
+  if run_decisions "$home" resolve "$origin" mistaken \
+    --decision-file "$home/marker-cross-decision.txt" \
+    --routed-to sample-marker-cross-late \
+    > "$home/marker-cross-resolve2.out" 2> "$home/marker-cross-resolve2.err"; then
+    fail "resolve replaced an ordinary partially recorded withdrawal"
+  fi
+  assert_grep "already records a withdrawal" "$home/marker-cross-resolve2.err" \
+    "resolving an ordinary partial withdrawal must still be refused"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "Registered in error with ordinary text." \
+    "ordinary cross-path resolve damaged the withdrawal reason"
+  assert_not_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "ordinary cross-path resolve wrote a resolution over a partial withdrawal"
+  run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/marker-cross-reason.txt" >/dev/null \
+    || fail "ordinary partial-withdraw retry did not close after the cross-path refusal"
+
+  pass "queued close markers ignore free-text phrases and keep cross-path refusals"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -946,3 +1152,4 @@ test_resolve_matches_quoted_blocked_by_edges
 test_resolve_closes_holds_whose_routed_work_completed
 test_withdraw_closes_a_hold_registered_in_error
 test_partial_close_identity_survives_done_failure
+test_queued_close_markers_ignore_free_text_phrases

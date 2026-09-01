@@ -211,7 +211,7 @@ verify_hold_resolved() {  # <hold-id>
   [ "$state" = "done" ] || return 1
   [ "$kind" = captain ] || return 1
   case "$body" in
-    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
+    '"Resolution recorded by fm-decision-hold.'*"Routed work:"*) return 0 ;;
   esac
   return 1
 }
@@ -225,7 +225,7 @@ verify_hold_withdrawn() {  # <hold-id>
   [ "$state" = "done" ] || return 1
   [ "$kind" = captain ] || return 1
   case "$body" in
-    *"Withdrawn by fm-decision-hold."*"Withdrawal reason:"*) return 0 ;;
+    '"Withdrawn by fm-decision-hold.'*"Withdrawal reason:"*) return 0 ;;
   esac
   return 1
 }
@@ -243,8 +243,8 @@ verify_hold_durable() {  # <hold-id>
   fi
   if [ "$state" = "done" ] && [ "$kind" = captain ]; then
     case "$body" in
-      *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
-      *"Withdrawn by fm-decision-hold."*"Withdrawal reason:"*) return 0 ;;
+      '"Resolution recorded by fm-decision-hold.'*"Routed work:"*) return 0 ;;
+      '"Withdrawn by fm-decision-hold.'*"Withdrawal reason:"*) return 0 ;;
     esac
   fi
   fail "captain decision $id is neither actively held nor durably closed"
@@ -292,7 +292,7 @@ verify_withdrawal_identity() {
 guard_queued_close_record() {
   local id=$1 path=$2 hold_body=$3 digest=$4 routed_csv=${5:-}
   case "$hold_body" in
-    *"Resolution recorded by fm-decision-hold."*)
+    '"Resolution recorded by fm-decision-hold.'*)
       case "$path" in
         resolve)
           verify_resolution_identity "$id" "$hold_body" "$digest" "$routed_csv"
@@ -302,7 +302,7 @@ guard_queued_close_record() {
           ;;
       esac
       ;;
-    *"Withdrawn by fm-decision-hold."*)
+    '"Withdrawn by fm-decision-hold.'*)
       case "$path" in
         withdraw)
           verify_withdrawal_identity "$id" "$hold_body" "$digest"
