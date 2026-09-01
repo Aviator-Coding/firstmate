@@ -62,6 +62,7 @@ Each was run against the pre-change script first and failed there, the first wit
 Both also pin the refusals that carry the safety property, including an absent routed task, completed work that was never blocked by the hold, a withdrawal with no written reason, `--routed-to` on a withdrawal, resolving a withdrawn hold, and withdrawing an answered one.
 
 The final verification commands and their exact summarized outputs follow.
+`bin/fm-test-run.sh` owns complete-inventory enforcement in CI, so the whole suite is not recopied here.
 
 ```text
 $ bash tests/fm-decision-hold-lifecycle.test.sh
@@ -91,8 +92,8 @@ ok - main and secondmate captain actionability use the same blocker readiness
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
 
-$ bash tests/fm-teardown.test.sh
-all teardown safety cases passed
+$ bash tests/fm-teardown.test.sh | grep -c '^ok - '
+65
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
@@ -103,6 +104,6 @@ fm-doc-audience-check: ok surfaces=67 local_links=234
 $ git diff --check
 (no output)
 
-$ for test_script in tests/*.test.sh; do bash "$test_script"; done
-ALL 71 TEST SCRIPTS PASSED
+$ bin/fm-test-run.sh --check-coverage
+FM_TEST_COVERAGE ok total=136 parallel=24 serial=99 serial_shards=4 herdr=13
 ```
