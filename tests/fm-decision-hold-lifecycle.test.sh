@@ -751,6 +751,188 @@ test_withdraw_closes_a_hold_registered_in_error() {
   pass "withdraw closes a hold registered in error and stays distinct from a captain decision"
 }
 
+# After update --body succeeds and tasks-axi done fails once, the hold stays queued
+# with close text already stored. That partial-close window must re-verify identity
+# on exact retry, reject a changed record, and refuse the opposite close path.
+test_partial_close_identity_survives_done_failure() {
+  local home origin hold show
+
+  # Partial withdrawal: changed reason is refused; exact retry still closes.
+  home=$(make_home partial-withdraw-identity)
+  origin=sample-partial-withdraw-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Partial withdraw review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create partial-withdraw origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Partial withdraw review\n\nOne hold registered in error.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken choice" --reason "registered in error" --repo sample) \
+    || fail "could not register the partial-withdraw hold"
+  printf 'Registered in error: the choice was already executed.\n' > "$home/partial-withdraw-reason.txt"
+  printf 'A different account of the same registration error.\n' > "$home/changed-partial-withdraw-reason.txt"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ ! -f "$FM_HOME/done-failed-once" ]; then
+  : > "$FM_HOME/done-failed-once"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/partial-withdraw-reason.txt" \
+    > "$home/partial-withdraw.out" 2> "$home/partial-withdraw.err"; then
+    fail "withdrawal succeeded after a forced done failure"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "partial withdrawal closed the hold before done succeeded"
+  assert_contains "$show" "Withdrawn by fm-decision-hold" \
+    "partial withdrawal did not store the durable reason before done failed"
+  assert_contains "$show" "the choice was already executed" \
+    "partial withdrawal lost the written reason"
+  if run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/changed-partial-withdraw-reason.txt" \
+    > "$home/partial-withdraw-drift.out" 2> "$home/partial-withdraw-drift.err"; then
+    fail "partial withdrawal retry accepted a different written reason"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "the choice was already executed" \
+    "a drifted partial-withdraw retry overwrote the stored reason"
+  assert_not_contains "$show" "A different account of the same registration error" \
+    "a drifted partial-withdraw retry wrote the changed reason"
+  run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/partial-withdraw-reason.txt" >/dev/null \
+    || fail "exact partial-withdraw retry did not close the hold"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "exact partial-withdraw retry left the hold open"
+  assert_contains "$show" "the choice was already executed" \
+    "exact partial-withdraw retry lost the stored reason"
+
+  # Partial resolution body refuses withdraw and keeps the captain decision.
+  home=$(make_home partial-resolve-blocks-withdraw)
+  origin=sample-partial-resolve-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Partial resolve review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create partial-resolve origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Partial resolve review\n\nOne answered hold.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" answered \
+    --title "Choose the answered option" --reason "captain answer pending" --repo sample) \
+    || fail "could not register the partial-resolve hold"
+  tasks_in "$home" add sample-partial-resolve-work "Apply the answered choice" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create partial-resolve dependent work"
+  printf 'Take the answered option.\n' > "$home/partial-resolve-decision.txt"
+  printf 'Registered in error after a partial resolution.\n' > "$home/partial-resolve-withdraw-reason.txt"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ ! -f "$FM_HOME/done-failed-once" ]; then
+  : > "$FM_HOME/done-failed-once"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" resolve "$origin" answered \
+    --decision-file "$home/partial-resolve-decision.txt" \
+    --routed-to sample-partial-resolve-work \
+    > "$home/partial-resolve.out" 2> "$home/partial-resolve.err"; then
+    fail "resolution succeeded after a forced done failure"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "partial resolution closed the hold before done succeeded"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "partial resolution did not store the captain decision before done failed"
+  assert_contains "$show" "Take the answered option." \
+    "partial resolution lost the captain decision text"
+  if run_decisions "$home" withdraw "$origin" answered \
+    --reason-file "$home/partial-resolve-withdraw-reason.txt" \
+    > "$home/partial-resolve-withdraw.out" 2> "$home/partial-resolve-withdraw.err"; then
+    fail "withdraw replaced a partially recorded captain decision"
+  fi
+  assert_grep "already records a captain decision" "$home/partial-resolve-withdraw.err" \
+    "withdrawing a partial resolution must name the recorded decision"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "withdraw damaged a partially recorded captain decision"
+  assert_contains "$show" "Take the answered option." \
+    "withdraw overwrote the partially recorded captain decision text"
+  assert_not_contains "$show" "Withdrawn by fm-decision-hold" \
+    "withdraw wrote a withdrawal over a partial resolution"
+  run_decisions "$home" resolve "$origin" answered \
+    --decision-file "$home/partial-resolve-decision.txt" \
+    --routed-to sample-partial-resolve-work >/dev/null \
+    || fail "exact partial-resolve retry did not close the hold"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "exact partial-resolve retry left the hold open"
+  assert_contains "$show" "Take the answered option." \
+    "exact partial-resolve retry lost the captain decision"
+
+  # Partial withdrawal body refuses resolve and keeps the withdrawal reason.
+  home=$(make_home partial-withdraw-blocks-resolve)
+  origin=sample-partial-cross-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Partial cross review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create partial-cross origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Partial cross review\n\nOne hold registered in error.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken choice" --reason "registered in error" --repo sample) \
+    || fail "could not register the partial-cross hold"
+  tasks_in "$home" add sample-partial-cross-work "Late dependent work" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create partial-cross dependent work"
+  printf 'Registered in error: no captain answer belongs here.\n' > "$home/partial-cross-reason.txt"
+  printf 'Invent a captain answer after a partial withdrawal.\n' > "$home/partial-cross-decision.txt"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ ! -f "$FM_HOME/done-failed-once" ]; then
+  : > "$FM_HOME/done-failed-once"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/partial-cross-reason.txt" \
+    > "$home/partial-cross-withdraw.out" 2> "$home/partial-cross-withdraw.err"; then
+    fail "cross-path withdrawal succeeded after a forced done failure"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "partial cross withdrawal closed the hold before done succeeded"
+  assert_contains "$show" "Withdrawn by fm-decision-hold" \
+    "partial cross withdrawal did not store its reason before done failed"
+  assert_contains "$show" "no captain answer belongs here" \
+    "partial cross withdrawal lost the written reason"
+  if run_decisions "$home" resolve "$origin" mistaken \
+    --decision-file "$home/partial-cross-decision.txt" \
+    --routed-to sample-partial-cross-work \
+    > "$home/partial-cross-resolve.out" 2> "$home/partial-cross-resolve.err"; then
+    fail "resolve replaced a partially recorded withdrawal"
+  fi
+  assert_grep "already records a withdrawal" "$home/partial-cross-resolve.err" \
+    "resolving a partial withdrawal must name the recorded withdrawal"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "Withdrawn by fm-decision-hold" \
+    "resolve damaged a partially recorded withdrawal"
+  assert_contains "$show" "no captain answer belongs here" \
+    "resolve overwrote the partially recorded withdrawal reason"
+  assert_not_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "resolve wrote a resolution over a partial withdrawal"
+  run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/partial-cross-reason.txt" >/dev/null \
+    || fail "exact partial-cross withdraw retry did not close the hold"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "exact partial-cross withdraw retry left the hold open"
+  assert_contains "$show" "no captain answer belongs here" \
+    "exact partial-cross withdraw retry lost the stored reason"
+
+  pass "partial close identity is stable across a done failure on both paths"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -763,3 +945,4 @@ test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
 test_resolve_closes_holds_whose_routed_work_completed
 test_withdraw_closes_a_hold_registered_in_error
+test_partial_close_identity_survives_done_failure

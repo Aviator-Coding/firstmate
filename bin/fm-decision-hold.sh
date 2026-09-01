@@ -286,6 +286,35 @@ verify_withdrawal_identity() {
     || fail "captain hold $id records a different withdrawal reason"
 }
 
+# After verify_hold_active: a prior close may have stored its durable record and
+# then failed before Done, leaving the hold queued with close text already in the
+# body. Exact retry re-verifies that identity; the opposite close path refuses.
+guard_queued_close_record() {
+  local id=$1 path=$2 hold_body=$3 digest=$4 routed_csv=${5:-}
+  case "$hold_body" in
+    *"Resolution recorded by fm-decision-hold."*)
+      case "$path" in
+        resolve)
+          verify_resolution_identity "$id" "$hold_body" "$digest" "$routed_csv"
+          ;;
+        withdraw)
+          fail "captain hold $id already records a captain decision; withdrawal cannot replace it"
+          ;;
+      esac
+      ;;
+    *"Withdrawn by fm-decision-hold."*)
+      case "$path" in
+        withdraw)
+          verify_withdrawal_identity "$id" "$hold_body" "$digest"
+          ;;
+        resolve)
+          fail "captain hold $id already records a withdrawal; resolve cannot replace it"
+          ;;
+      esac
+      ;;
+  esac
+}
+
 command_id() {
   [ "$#" -eq 2 ] || { usage >&2; exit 2; }
   hold_id "$1" "$2"
@@ -479,11 +508,7 @@ command_resolve() {
   verify_hold_active "$id"
   hold_show=$(task_show "$id")
   hold_body=$(show_field "$hold_show" body)
-  case "$hold_body" in
-    *"Resolution recorded by fm-decision-hold."*)
-      verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
-      ;;
-  esac
+  guard_queued_close_record "$id" resolve "$hold_body" "$decision_digest" "$routed_csv"
 
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
@@ -561,6 +586,9 @@ command_withdraw() {
     fail "captain hold $id already records a captain decision; withdrawal cannot replace it"
   fi
   verify_hold_active "$id"
+  hold_show=$(task_show "$id")
+  hold_body=$(show_field "$hold_show" body)
+  guard_queued_close_record "$id" withdraw "$hold_body" "$reason_digest"
   body=$(printf 'Withdrawn by fm-decision-hold.\nReason digest: %s\n\nWithdrawal reason:\n%s\n' \
     "$reason_digest" "$reason")
   tasks_axi update "$id" --body "$body" >/dev/null \
