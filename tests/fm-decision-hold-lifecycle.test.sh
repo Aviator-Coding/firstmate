@@ -1288,6 +1288,124 @@ EOF
   pass "queued close markers ignore free-text phrases and keep cross-path refusals"
 }
 
+# Once a closed hold ages out of Done into the archive, exact retry and identity
+# rejection must still work. verify_hold_resolved/withdrawn already consult the
+# archive; the retry body reload must too, or set -e exits silently on live-only
+# task_show before the identity checks run.
+test_archived_hold_retry_stays_idempotent_and_identity_safe() {
+  local home origin hold show out err
+
+  # Resolved hold ages out of Done, then exact and drifted retries.
+  home=$(make_home archived-resolve-retry)
+  origin=sample-archived-resolve
+  mkdir -p "$home/data/$origin"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 1
+EOF
+  tasks_in "$home" add "$origin" "Archived resolve review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archived-resolve origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Archived resolve review\n\nOne choice.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the archived route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the archived-resolve hold"
+  tasks_in "$home" add sample-archived-route "Apply the archived route" --kind ship --repo sample \
+    --blocked-by "$hold" >/dev/null || fail "could not create archived-route work"
+  printf 'Take the archived north route.\n' > "$home/archived-route-decision.txt"
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/archived-route-decision.txt" \
+    --routed-to sample-archived-route > "$home/archived-resolve.out" 2> "$home/archived-resolve.err" \
+    || fail "initial resolve failed before archival: $(cat "$home/archived-resolve.err")"
+
+  # Push the closed hold out of Done under done_keep=1.
+  tasks_in "$home" add sample-archive-pusher "Push the closed hold out of Done" \
+    --kind ship --repo sample >/dev/null || fail "could not create archive pusher"
+  tasks_in "$home" "done" sample-archive-pusher >/dev/null \
+    || fail "could not complete archive pusher"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "fixture expected the resolved hold to leave live Done after retention pruning"
+  fi
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "resolved hold was not archived; retention fixture is vacuous"
+
+  out=$(run_decisions "$home" resolve "$origin" route \
+    --decision-file "$home/archived-route-decision.txt" \
+    --routed-to sample-archived-route 2> "$home/archived-retry.err") \
+    || fail "exact resolve retry of an archived hold failed: $(cat "$home/archived-retry.err")"
+  assert_contains "$out" "resolved: $hold" \
+    "exact resolve retry of an archived hold must still print its resolved line"
+
+  printf 'Take a different archived route.\n' > "$home/changed-archived-route-decision.txt"
+  if run_decisions "$home" resolve "$origin" route \
+    --decision-file "$home/changed-archived-route-decision.txt" \
+    --routed-to sample-archived-route \
+    > "$home/archived-drift.out" 2> "$home/archived-drift.err"; then
+    fail "changed-decision retry of an archived hold succeeded silently"
+  fi
+  assert_grep "records a different captain decision" "$home/archived-drift.err" \
+    "changed-decision retry of an archived hold must keep its explicit identity error"
+
+  # Withdrawn hold ages out of Done, then exact and drifted retries.
+  home=$(make_home archived-withdraw-retry)
+  origin=sample-archived-withdraw
+  mkdir -p "$home/data/$origin"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 1
+EOF
+  tasks_in "$home" add "$origin" "Archived withdraw review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archived-withdraw origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Archived withdraw review\n\nOne mistaken choice.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken choice" --reason "registered in error" --repo sample) \
+    || fail "could not register the archived-withdraw hold"
+  printf 'Registered in error and already executed.\n' > "$home/archived-withdraw-reason.txt"
+  run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/archived-withdraw-reason.txt" \
+    > "$home/archived-withdraw.out" 2> "$home/archived-withdraw.err" \
+    || fail "initial withdraw failed before archival: $(cat "$home/archived-withdraw.err")"
+
+  tasks_in "$home" add sample-withdraw-pusher "Push the withdrawn hold out of Done" \
+    --kind ship --repo sample >/dev/null || fail "could not create withdraw pusher"
+  tasks_in "$home" "done" sample-withdraw-pusher >/dev/null \
+    || fail "could not complete withdraw pusher"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "fixture expected the withdrawn hold to leave live Done after retention pruning"
+  fi
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "withdrawn hold was not archived; retention fixture is vacuous"
+
+  out=$(run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/archived-withdraw-reason.txt" 2> "$home/archived-withdraw-retry.err") \
+    || fail "exact withdraw retry of an archived hold failed: $(cat "$home/archived-withdraw-retry.err")"
+  assert_contains "$out" "withdrawn: $hold" \
+    "exact withdraw retry of an archived hold must still print its withdrawn line"
+
+  printf 'A different archived withdrawal reason.\n' > "$home/changed-archived-withdraw-reason.txt"
+  if run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/changed-archived-withdraw-reason.txt" \
+    > "$home/archived-withdraw-drift.out" 2> "$home/archived-withdraw-drift.err"; then
+    fail "changed-reason retry of an archived hold succeeded silently"
+  fi
+  assert_grep "records a different withdrawal reason" "$home/archived-withdraw-drift.err" \
+    "changed-reason retry of an archived hold must keep its explicit identity error"
+
+  pass "archived hold retries stay idempotent and identity-safe after Done retention"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -1304,3 +1422,4 @@ test_batch_close_survives_done_retention_pruning
 test_withdraw_closes_a_hold_registered_in_error
 test_partial_close_identity_survives_done_failure
 test_queued_close_markers_ignore_free_text_phrases
+test_archived_hold_retry_stays_idempotent_and_identity_safe

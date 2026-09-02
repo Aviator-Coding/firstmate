@@ -588,7 +588,7 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$(task_show_archived_too "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
@@ -670,7 +670,7 @@ command_withdraw() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_withdrawn "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$(task_show_archived_too "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_withdrawal_identity "$id" "$hold_body" "$reason_digest"
     printf 'withdrawn: %s\n' "$id"
