@@ -633,6 +633,100 @@ test_resolve_closes_holds_whose_routed_work_completed() {
   pass "resolve closes a hold whose routed work already completed and keeps its routing refusals"
 }
 
+# Closing several holds in one batch is the ordinary case, not an edge case: each
+# close appends a row to Done, and Done retention archives the oldest rows to stay
+# at its limit. The routed work a batch closes against has usually completed some
+# time ago, so it sits near the bottom of Done and the earliest closes push it out
+# from under the later ones. The batch must not depend on the order the holds are
+# closed in, nor on how much unrelated Done churn ran alongside it.
+test_batch_close_survives_done_retention_pruning() {
+  local home origin keep k hold show json archived
+  home=$(make_home batch-retention)
+  origin=sample-batch-review
+  mkdir -p "$home/data/$origin"
+  keep=$(sed -n 's/^[[:space:]]*done_keep[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    "$home/.tasks.toml" | head -1)
+  [ -n "$keep" ] || fail "the fixture backlog config declares no Done retention limit"
+  tasks_in "$home" add "$origin" "Batch review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the batch origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Batch review\n\nThree unresolved captain choices.\n' > "$home/data/$origin/report.md"
+
+  for k in one two three; do
+    run_decisions "$home" hold "$origin" "$k" --title "Choose option $k" \
+      --reason "captain choice $k pending" --repo sample >/dev/null \
+      || fail "could not register the $k hold"
+    tasks_in "$home" add "sample-routed-$k" "Apply option $k" --kind ship --repo sample \
+      --blocked-by "$origin-decision-$k" >/dev/null \
+      || fail "could not create routed work for $k"
+    tasks_in "$home" "done" "sample-routed-$k" >/dev/null \
+      || fail "could not complete routed work for $k"
+    printf 'Take option %s.\n' "$k" > "$home/decision-$k.txt"
+  done
+
+  # Ordinary later work fills Done to its retention limit, so the routed rows are
+  # the oldest entries and the first close in the batch starts archiving them.
+  for k in $(seq 1 "$((keep - 3))"); do
+    tasks_in "$home" add "sample-filler-$k" "Unrelated finished work $k" --kind ship --repo sample >/dev/null \
+      || fail "could not create filler work $k"
+    tasks_in "$home" "done" "sample-filler-$k" >/dev/null || fail "could not complete filler work $k"
+  done
+  tasks_in "$home" show sample-routed-one --full >/dev/null \
+    || fail "the fixture must start with every routed row still in the live backlog"
+
+  # Closed in the order that pushes each routed row out from under a later close.
+  for k in three two one; do
+    run_decisions "$home" resolve "$origin" "$k" --decision-file "$home/decision-$k.txt" \
+      --routed-to "sample-routed-$k" > "$home/batch-$k.out" 2> "$home/batch-$k.err" \
+      || fail "closing $k in a batch needed manual recovery: $(cat "$home/batch-$k.err")"
+  done
+
+  archived=0
+  for k in one two three; do
+    tasks_in "$home" show "sample-routed-$k" --full >/dev/null 2>&1 || archived=$((archived + 1))
+  done
+  [ "$archived" -gt 0 ] \
+    || fail "the fixture never pruned a routed row, so it does not exercise the retention gap"
+
+  for k in one two three; do
+    hold="$origin-decision-$k"
+    show=$(run_decisions "$home" verify "$origin" 2>/dev/null; tasks_in "$home" show "$hold" --full) \
+      || fail "closed hold $hold vanished from the home"
+    assert_contains "$show" "state: done" "hold $hold did not close in the batch"
+    assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+      "hold $hold lost its durable decision record"
+    assert_contains "$show" "sample-routed-$k" "hold $hold lost its routed identity"
+  done
+
+  # Reading the archive must not weaken either refusal the close depends on.
+  run_decisions "$home" hold "$origin" four --title "Choose option four" \
+    --reason "captain choice four pending" --repo sample >/dev/null \
+    || fail "could not register the control hold"
+  if run_decisions "$home" resolve "$origin" four --decision-file "$home/decision-one.txt" \
+    --routed-to sample-never-existed > "$home/control.out" 2> "$home/control.err"; then
+    fail "resolve accepted a routed task that exists in neither the backlog nor the archive"
+  fi
+  assert_grep "does not exist in the active home" "$home/control.err" \
+    "an absent routed task must still fail with the existence error"
+  if run_decisions "$home" resolve "$origin" four --decision-file "$home/decision-one.txt" \
+    --routed-to sample-filler-1 > "$home/control2.out" 2> "$home/control2.err"; then
+    fail "archived-or-live lookup let unrouted finished work close a hold"
+  fi
+  assert_grep "not durably blocked by" "$home/control2.err" \
+    "finished work that was never routed must still fail with the durable-block error"
+  show=$(tasks_in "$home" show "$origin-decision-four" --full)
+  assert_contains "$show" "state: queued" "a refused resolve must leave the control hold open"
+  assert_contains "$show" "held: yes" "a refused resolve must leave the control hold held"
+
+  json=$(run_bearings "$home") || fail "Bearings failed after the batch close"
+  printf '%s' "$json" | jq -e --arg origin "$origin" '
+    [.decisions_open[]? | select(.id | startswith($origin + "-decision-"))]
+    | length == 1 and .[0].id == ($origin + "-decision-four")
+  ' >/dev/null || fail "the batch left the wrong set of decisions open: $json"
+  pass "a batch of closes survives Done retention pruning without manual recovery"
+}
+
 # Shape 2 of the stranded-hold gap: a hold registered in error, for a choice that
 # had already been taken and executed. There is no captain answer to record, so
 # resolve cannot close it and no supported path existed at all.
@@ -1150,6 +1244,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
 test_resolve_closes_holds_whose_routed_work_completed
+test_batch_close_survives_done_retention_pruning
 test_withdraw_closes_a_hold_registered_in_error
 test_partial_close_identity_survives_done_failure
 test_queued_close_markers_ignore_free_text_phrases
