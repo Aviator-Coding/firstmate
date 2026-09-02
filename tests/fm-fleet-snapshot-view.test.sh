@@ -355,6 +355,85 @@ EOF
   pass "backlog normalization preserves strict roles and resolves every blocker compatibly"
 }
 
+# A hand-edited row may join two dependency edges with a comma instead of
+# repeating the token. Both forms name the same blockers, so a comma-joined row
+# must not read as one blocker id that no task can ever satisfy, which would
+# leave the row reported as blocked forever.
+test_comma_joined_blockers_parse_as_separate_ids() {
+  local home fakebin out
+  home=$(make_home comma-blockers)
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] review - Security review (repo: alpha) (kind: ship)
+- [ ] worker - Real worker (repo: alpha) (kind: ship)
+- [ ] captain-run - Run canary blocked-by: worker,review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .title == "Run canary"
+      and .blocked_by_ids == ["worker", "review"]
+      and .unresolved_blocker_ids == ["worker", "review"]
+      and .captain_actionable == false
+  ' >/dev/null || fail "a comma-joined blocker list did not parse as two ids: $out"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] captain-run - Run canary blocked-by: worker,review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+- [x] worker - Real worker (repo: alpha) (kind: ship) (done 2026-07-22)
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .blocked_by_ids == ["worker", "review"]
+      and .unresolved_blocker_ids == ["review"]
+      and .captain_actionable == false
+  ' >/dev/null || fail "one completed comma-joined blocker did not leave exactly one unresolved id: $out"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] captain-run - Run canary blocked-by: worker,review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+- [x] worker - Real worker (repo: alpha) (kind: ship) (done 2026-07-22)
+- [x] review - Security review (repo: alpha) (kind: ship) (done 2026-07-22)
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .unresolved_blocker_ids == []
+      and .captain_actionable == true
+  ' >/dev/null || fail "completed comma-joined blockers did not clear the hold: $out"
+
+  # Mixed and duplicated forms must fold to the same ordered, deduplicated set.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] mixed - Mixed forms blocked-by: worker,review blocked-by: worker blocked-by: audit (repo: alpha) (kind: ship)
+
+## Done
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "mixed")
+    | .title == "Mixed forms"
+      and .blocked_by_ids == ["worker", "review", "audit"]
+  ' >/dev/null || fail "mixed comma and repeated blocker tokens did not fold correctly: $out"
+  pass "comma-joined blocker lists parse as separate ids and resolve independently"
+}
+
 test_event_hints_follow_reconciled_current_state() {
   local home fakebin out hint_gen
   home=$(make_home event-hints)
@@ -783,6 +862,7 @@ test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
+test_comma_joined_blockers_parse_as_separate_ids
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint

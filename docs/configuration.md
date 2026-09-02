@@ -45,6 +45,8 @@ Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" belo
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+Write a dependency edge as its own `blocked-by: <id>` token and repeat the token for a second edge, which is the form `tasks-axi block` writes.
+A comma-joined `blocked-by: a,b` is not read back by tasks-axi at all: it is absorbed into the task title, the row reports no dependencies, and a decision hold routed to that task can never be closed against it.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 

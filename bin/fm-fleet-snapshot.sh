@@ -295,8 +295,16 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
       | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
       | clean_title;
+    # tasks-axi writes one token per edge, but a hand-edited row may join them
+    # with commas. Both forms name the same set of blockers, so split each token
+    # rather than reading "a,b" as a single id no task can ever satisfy.
     def blocked_by_ids($rest):
-      [ $rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0] ]
+      [ $rest
+        | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)")
+        | .[0]
+        | split(",")[]
+        | trim
+        | select(. != "") ]
       | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end);
     def blocked_reason($rest):
       cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason

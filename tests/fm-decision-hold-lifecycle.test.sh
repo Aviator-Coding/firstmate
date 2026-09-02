@@ -633,6 +633,155 @@ test_resolve_closes_holds_whose_routed_work_completed() {
   pass "resolve closes a hold whose routed work already completed and keeps its routing refusals"
 }
 
+# One piece of work often answers two captain decisions at once. It must be able
+# to carry both hold edges simultaneously and have each close independently, so
+# that answering the first decision neither drops the second edge nor needs the
+# row rewritten by hand between the two closes.
+test_one_task_answers_two_decisions() {
+  local home origin first second show
+  home=$(make_home two-edge-answer)
+  origin=sample-two-answer-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Two-answer review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the two-answer origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Two-answer review\n\nTwo choices answered by one change.\n' > "$home/data/$origin/report.md"
+
+  first=$(run_decisions "$home" hold "$origin" relocation \
+    --title "Choose the relocation" --reason "captain relocation choice pending" --repo sample) \
+    || fail "could not register the relocation hold"
+  second=$(run_decisions "$home" hold "$origin" one-place \
+    --title "Choose where a finding lands" --reason "captain landing choice pending" --repo sample) \
+    || fail "could not register the landing hold"
+
+  tasks_in "$home" add sample-answers-both "Apply both choices" --kind ship --repo sample >/dev/null \
+    || fail "could not create the answering work"
+  tasks_in "$home" block sample-answers-both --by "$first" >/dev/null \
+    || fail "could not record the first edge"
+  tasks_in "$home" block sample-answers-both --by "$second" >/dev/null \
+    || fail "could not record the second edge"
+  show=$(tasks_in "$home" show sample-answers-both --full)
+  assert_contains "$show" "blocked_by: \"$first,$second\"" \
+    "one task must carry both hold edges at once"
+
+  printf 'Relocate it.\n' > "$home/answer-first.txt"
+  run_decisions "$home" resolve "$origin" relocation --decision-file "$home/answer-first.txt" \
+    --routed-to sample-answers-both > "$home/two-first.out" 2> "$home/two-first.err" \
+    || fail "the first of two decisions did not close: $(cat "$home/two-first.err")"
+  show=$(tasks_in "$home" show sample-answers-both --full)
+  assert_contains "$show" "blocked_by: $second" \
+    "closing the first decision must clear only its own edge and keep the second"
+
+  printf 'Land it in one place.\n' > "$home/answer-second.txt"
+  run_decisions "$home" resolve "$origin" one-place --decision-file "$home/answer-second.txt" \
+    --routed-to sample-answers-both > "$home/two-second.out" 2> "$home/two-second.err" \
+    || fail "the second of two decisions did not close: $(cat "$home/two-second.err")"
+  show=$(tasks_in "$home" show sample-answers-both --full)
+  assert_contains "$show" "blocked_by: none" "closing both decisions must leave the work unblocked"
+  assert_contains "$show" "state: queued" "the answering work must stay dispatchable"
+
+  for show in "$first" "$second"; do
+    assert_contains "$(tasks_in "$home" show "$show" --full)" "state: done" \
+      "hold $show did not close against work that answered both decisions"
+  done
+  pass "one task carries two decision edges and each closes independently"
+}
+
+# Closing several holds in one batch is the ordinary case, not an edge case: each
+# close appends a row to Done, and Done retention archives the oldest rows to stay
+# at its limit. The routed work a batch closes against has usually completed some
+# time ago, so it sits near the bottom of Done and the earliest closes push it out
+# from under the later ones. The batch must not depend on the order the holds are
+# closed in, nor on how much unrelated Done churn ran alongside it.
+test_batch_close_survives_done_retention_pruning() {
+  local home origin keep k hold show json archived
+  home=$(make_home batch-retention)
+  origin=sample-batch-review
+  mkdir -p "$home/data/$origin"
+  keep=$(sed -n 's/^[[:space:]]*done_keep[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    "$home/.tasks.toml" | head -1)
+  [ -n "$keep" ] || fail "the fixture backlog config declares no Done retention limit"
+  tasks_in "$home" add "$origin" "Batch review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the batch origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Batch review\n\nThree unresolved captain choices.\n' > "$home/data/$origin/report.md"
+
+  for k in one two three; do
+    run_decisions "$home" hold "$origin" "$k" --title "Choose option $k" \
+      --reason "captain choice $k pending" --repo sample >/dev/null \
+      || fail "could not register the $k hold"
+    tasks_in "$home" add "sample-routed-$k" "Apply option $k" --kind ship --repo sample \
+      --blocked-by "$origin-decision-$k" >/dev/null \
+      || fail "could not create routed work for $k"
+    tasks_in "$home" "done" "sample-routed-$k" >/dev/null \
+      || fail "could not complete routed work for $k"
+    printf 'Take option %s.\n' "$k" > "$home/decision-$k.txt"
+  done
+
+  # Ordinary later work fills Done to its retention limit, so the routed rows are
+  # the oldest entries and the first close in the batch starts archiving them.
+  for k in $(seq 1 "$((keep - 3))"); do
+    tasks_in "$home" add "sample-filler-$k" "Unrelated finished work $k" --kind ship --repo sample >/dev/null \
+      || fail "could not create filler work $k"
+    tasks_in "$home" "done" "sample-filler-$k" >/dev/null || fail "could not complete filler work $k"
+  done
+  tasks_in "$home" show sample-routed-one --full >/dev/null \
+    || fail "the fixture must start with every routed row still in the live backlog"
+
+  # Closed in the order that pushes each routed row out from under a later close.
+  for k in three two one; do
+    run_decisions "$home" resolve "$origin" "$k" --decision-file "$home/decision-$k.txt" \
+      --routed-to "sample-routed-$k" > "$home/batch-$k.out" 2> "$home/batch-$k.err" \
+      || fail "closing $k in a batch needed manual recovery: $(cat "$home/batch-$k.err")"
+  done
+
+  archived=0
+  for k in one two three; do
+    tasks_in "$home" show "sample-routed-$k" --full >/dev/null 2>&1 || archived=$((archived + 1))
+  done
+  [ "$archived" -gt 0 ] \
+    || fail "the fixture never pruned a routed row, so it does not exercise the retention gap"
+
+  for k in one two three; do
+    hold="$origin-decision-$k"
+    show=$(run_decisions "$home" verify "$origin" 2>/dev/null; tasks_in "$home" show "$hold" --full) \
+      || fail "closed hold $hold vanished from the home"
+    assert_contains "$show" "state: done" "hold $hold did not close in the batch"
+    assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+      "hold $hold lost its durable decision record"
+    assert_contains "$show" "sample-routed-$k" "hold $hold lost its routed identity"
+  done
+
+  # Reading the archive must not weaken either refusal the close depends on.
+  run_decisions "$home" hold "$origin" four --title "Choose option four" \
+    --reason "captain choice four pending" --repo sample >/dev/null \
+    || fail "could not register the control hold"
+  if run_decisions "$home" resolve "$origin" four --decision-file "$home/decision-one.txt" \
+    --routed-to sample-never-existed > "$home/control.out" 2> "$home/control.err"; then
+    fail "resolve accepted a routed task that exists in neither the backlog nor the archive"
+  fi
+  assert_grep "does not exist in the active home" "$home/control.err" \
+    "an absent routed task must still fail with the existence error"
+  if run_decisions "$home" resolve "$origin" four --decision-file "$home/decision-one.txt" \
+    --routed-to sample-filler-1 > "$home/control2.out" 2> "$home/control2.err"; then
+    fail "archived-or-live lookup let unrouted finished work close a hold"
+  fi
+  assert_grep "not durably blocked by" "$home/control2.err" \
+    "finished work that was never routed must still fail with the durable-block error"
+  show=$(tasks_in "$home" show "$origin-decision-four" --full)
+  assert_contains "$show" "state: queued" "a refused resolve must leave the control hold open"
+  assert_contains "$show" "held: yes" "a refused resolve must leave the control hold held"
+
+  json=$(run_bearings "$home") || fail "Bearings failed after the batch close"
+  printf '%s' "$json" | jq -e --arg origin "$origin" '
+    [.decisions_open[]? | select(.id | startswith($origin + "-decision-"))]
+    | length == 1 and .[0].id == ($origin + "-decision-four")
+  ' >/dev/null || fail "the batch left the wrong set of decisions open: $json"
+  pass "a batch of closes survives Done retention pruning without manual recovery"
+}
+
 # Shape 2 of the stranded-hold gap: a hold registered in error, for a choice that
 # had already been taken and executed. There is no captain answer to record, so
 # resolve cannot close it and no supported path existed at all.
@@ -1139,6 +1288,266 @@ EOF
   pass "queued close markers ignore free-text phrases and keep cross-path refusals"
 }
 
+# Once a closed hold ages out of Done into the archive, exact retry and identity
+# rejection must still work. verify_hold_resolved/withdrawn already consult the
+# archive; the retry body reload must too, or set -e exits silently on live-only
+# task_show before the identity checks run.
+test_archived_hold_retry_stays_idempotent_and_identity_safe() {
+  local home origin hold show out
+
+  # Resolved hold ages out of Done, then exact and drifted retries.
+  home=$(make_home archived-resolve-retry)
+  origin=sample-archived-resolve
+  mkdir -p "$home/data/$origin"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 1
+EOF
+  tasks_in "$home" add "$origin" "Archived resolve review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archived-resolve origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Archived resolve review\n\nOne choice.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the archived route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the archived-resolve hold"
+  tasks_in "$home" add sample-archived-route "Apply the archived route" --kind ship --repo sample \
+    --blocked-by "$hold" >/dev/null || fail "could not create archived-route work"
+  printf 'Take the archived north route.\n' > "$home/archived-route-decision.txt"
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/archived-route-decision.txt" \
+    --routed-to sample-archived-route > "$home/archived-resolve.out" 2> "$home/archived-resolve.err" \
+    || fail "initial resolve failed before archival: $(cat "$home/archived-resolve.err")"
+
+  # Push the closed hold out of Done under done_keep=1.
+  tasks_in "$home" add sample-archive-pusher "Push the closed hold out of Done" \
+    --kind ship --repo sample >/dev/null || fail "could not create archive pusher"
+  tasks_in "$home" "done" sample-archive-pusher >/dev/null \
+    || fail "could not complete archive pusher"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "fixture expected the resolved hold to leave live Done after retention pruning"
+  fi
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "resolved hold was not archived; retention fixture is vacuous"
+
+  out=$(run_decisions "$home" resolve "$origin" route \
+    --decision-file "$home/archived-route-decision.txt" \
+    --routed-to sample-archived-route 2> "$home/archived-retry.err") \
+    || fail "exact resolve retry of an archived hold failed: $(cat "$home/archived-retry.err")"
+  assert_contains "$out" "resolved: $hold" \
+    "exact resolve retry of an archived hold must still print its resolved line"
+
+  printf 'Take a different archived route.\n' > "$home/changed-archived-route-decision.txt"
+  if run_decisions "$home" resolve "$origin" route \
+    --decision-file "$home/changed-archived-route-decision.txt" \
+    --routed-to sample-archived-route \
+    > "$home/archived-drift.out" 2> "$home/archived-drift.err"; then
+    fail "changed-decision retry of an archived hold succeeded silently"
+  fi
+  assert_grep "records a different captain decision" "$home/archived-drift.err" \
+    "changed-decision retry of an archived hold must keep its explicit identity error"
+
+  # Withdrawn hold ages out of Done, then exact and drifted retries.
+  home=$(make_home archived-withdraw-retry)
+  origin=sample-archived-withdraw
+  mkdir -p "$home/data/$origin"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 1
+EOF
+  tasks_in "$home" add "$origin" "Archived withdraw review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archived-withdraw origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Archived withdraw review\n\nOne mistaken choice.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken choice" --reason "registered in error" --repo sample) \
+    || fail "could not register the archived-withdraw hold"
+  printf 'Registered in error and already executed.\n' > "$home/archived-withdraw-reason.txt"
+  run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/archived-withdraw-reason.txt" \
+    > "$home/archived-withdraw.out" 2> "$home/archived-withdraw.err" \
+    || fail "initial withdraw failed before archival: $(cat "$home/archived-withdraw.err")"
+
+  tasks_in "$home" add sample-withdraw-pusher "Push the withdrawn hold out of Done" \
+    --kind ship --repo sample >/dev/null || fail "could not create withdraw pusher"
+  tasks_in "$home" "done" sample-withdraw-pusher >/dev/null \
+    || fail "could not complete withdraw pusher"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "fixture expected the withdrawn hold to leave live Done after retention pruning"
+  fi
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "withdrawn hold was not archived; retention fixture is vacuous"
+
+  out=$(run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/archived-withdraw-reason.txt" 2> "$home/archived-withdraw-retry.err") \
+    || fail "exact withdraw retry of an archived hold failed: $(cat "$home/archived-withdraw-retry.err")"
+  assert_contains "$out" "withdrawn: $hold" \
+    "exact withdraw retry of an archived hold must still print its withdrawn line"
+
+  printf 'A different archived withdrawal reason.\n' > "$home/changed-archived-withdraw-reason.txt"
+  if run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/changed-archived-withdraw-reason.txt" \
+    > "$home/archived-withdraw-drift.out" 2> "$home/archived-withdraw-drift.err"; then
+    fail "changed-reason retry of an archived hold succeeded silently"
+  fi
+  assert_grep "records a different withdrawal reason" "$home/archived-withdraw-drift.err" \
+    "changed-reason retry of an archived hold must keep its explicit identity error"
+
+  pass "archived hold retries stay idempotent and identity-safe after Done retention"
+}
+
+# Once a closed hold ages out of Done into the archive, re-holding the same key
+# must still refuse with the durable resolved/withdrawn errors rather than
+# recreating a fresh queued/held captain item. Open-hold re-hold stays idempotent.
+test_archived_closed_hold_refuses_rehold() {
+  local home origin hold show out state held
+
+  # Open hold re-hold stays idempotent on the live-first path.
+  home=$(make_home open-hold-rehold)
+  origin=sample-open-rehold
+  mkdir -p "$home/data/$origin"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 1
+EOF
+  tasks_in "$home" add "$origin" "Open rehold review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create open-rehold origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Open rehold review\n\nOne choice.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the open route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the open hold"
+  out=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the open route" --reason "captain route choice pending" --repo sample \
+    2> "$home/open-rehold.err") \
+    || fail "idempotent re-hold of an open hold failed: $(cat "$home/open-rehold.err")"
+  assert_contains "$out" "$hold" \
+    "idempotent open re-hold must still print the hold id"
+  show=$(tasks_in "$home" show "$hold" --full) || fail "open hold disappeared after re-hold"
+  state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
+  held=$(printf '%s\n' "$show" | sed -n 's/^  held: //p' | head -1)
+  [ "$state" = queued ] || fail "open re-hold left state=$state, expected queued"
+  [ "$held" = yes ] || fail "open re-hold left held=$held, expected yes"
+
+  # Resolved hold ages out of Done; re-hold must refuse and not recreate it.
+  home=$(make_home archived-resolve-rehold)
+  origin=sample-archived-resolve-rehold
+  mkdir -p "$home/data/$origin"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 1
+EOF
+  tasks_in "$home" add "$origin" "Archived resolve rehold review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archived-resolve-rehold origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Archived resolve rehold review\n\nOne choice.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the archived resolve route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the archived-resolve-rehold hold"
+  tasks_in "$home" add sample-archived-resolve-rehold-route "Apply the archived resolve rehold route" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create archived-resolve-rehold route work"
+  printf 'Take the archived resolve rehold route.\n' > "$home/archived-resolve-rehold-decision.txt"
+  run_decisions "$home" resolve "$origin" route \
+    --decision-file "$home/archived-resolve-rehold-decision.txt" \
+    --routed-to sample-archived-resolve-rehold-route \
+    > "$home/archived-resolve-rehold.out" 2> "$home/archived-resolve-rehold.err" \
+    || fail "initial resolve failed before archival: $(cat "$home/archived-resolve-rehold.err")"
+
+  tasks_in "$home" add sample-resolve-rehold-pusher "Push the resolved hold out of Done" \
+    --kind ship --repo sample >/dev/null || fail "could not create resolve-rehold pusher"
+  tasks_in "$home" "done" sample-resolve-rehold-pusher >/dev/null \
+    || fail "could not complete resolve-rehold pusher"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "fixture expected the resolved hold to leave live Done after retention pruning"
+  fi
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "resolved hold was not archived; retention fixture is vacuous"
+
+  if run_decisions "$home" hold "$origin" route \
+    --title "Choose the archived resolve route" --reason "captain route choice pending" --repo sample \
+    > "$home/resolve-rehold.out" 2> "$home/resolve-rehold.err"; then
+    fail "re-hold of an archived resolved hold succeeded"
+  fi
+  assert_grep "already durably resolved" "$home/resolve-rehold.err" \
+    "re-hold of an archived resolved hold must keep its explicit durable error"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "re-hold of an archived resolved hold recreated a live backlog row"
+  fi
+
+  # Withdrawn hold ages out of Done; re-hold must refuse and not recreate it.
+  home=$(make_home archived-withdraw-rehold)
+  origin=sample-archived-withdraw-rehold
+  mkdir -p "$home/data/$origin"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 1
+EOF
+  tasks_in "$home" add "$origin" "Archived withdraw rehold review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archived-withdraw-rehold origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Archived withdraw rehold review\n\nOne mistaken choice.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken rehold choice" --reason "registered in error" --repo sample) \
+    || fail "could not register the archived-withdraw-rehold hold"
+  printf 'Registered in error and already executed.\n' > "$home/archived-withdraw-rehold-reason.txt"
+  run_decisions "$home" withdraw "$origin" mistaken \
+    --reason-file "$home/archived-withdraw-rehold-reason.txt" \
+    > "$home/archived-withdraw-rehold.out" 2> "$home/archived-withdraw-rehold.err" \
+    || fail "initial withdraw failed before archival: $(cat "$home/archived-withdraw-rehold.err")"
+
+  tasks_in "$home" add sample-withdraw-rehold-pusher "Push the withdrawn hold out of Done" \
+    --kind ship --repo sample >/dev/null || fail "could not create withdraw-rehold pusher"
+  tasks_in "$home" "done" sample-withdraw-rehold-pusher >/dev/null \
+    || fail "could not complete withdraw-rehold pusher"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "fixture expected the withdrawn hold to leave live Done after retention pruning"
+  fi
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "withdrawn hold was not archived; retention fixture is vacuous"
+
+  if run_decisions "$home" hold "$origin" mistaken \
+    --title "Approve an already-taken rehold choice" --reason "registered in error" --repo sample \
+    > "$home/withdraw-rehold.out" 2> "$home/withdraw-rehold.err"; then
+    fail "re-hold of an archived withdrawn hold succeeded"
+  fi
+  assert_grep "already durably withdrawn" "$home/withdraw-rehold.err" \
+    "re-hold of an archived withdrawn hold must keep its explicit durable error"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "re-hold of an archived withdrawn hold recreated a live backlog row"
+  fi
+
+  pass "archived closed holds refuse re-hold after Done retention"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -1150,6 +1559,10 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
 test_resolve_closes_holds_whose_routed_work_completed
+test_one_task_answers_two_decisions
+test_batch_close_survives_done_retention_pruning
 test_withdraw_closes_a_hold_registered_in_error
 test_partial_close_identity_survives_done_failure
 test_queued_close_markers_ignore_free_text_phrases
+test_archived_hold_retry_stays_idempotent_and_identity_safe
+test_archived_closed_hold_refuses_rehold
