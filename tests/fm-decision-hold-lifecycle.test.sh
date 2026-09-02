@@ -633,6 +633,61 @@ test_resolve_closes_holds_whose_routed_work_completed() {
   pass "resolve closes a hold whose routed work already completed and keeps its routing refusals"
 }
 
+# One piece of work often answers two captain decisions at once. It must be able
+# to carry both hold edges simultaneously and have each close independently, so
+# that answering the first decision neither drops the second edge nor needs the
+# row rewritten by hand between the two closes.
+test_one_task_answers_two_decisions() {
+  local home origin first second show
+  home=$(make_home two-edge-answer)
+  origin=sample-two-answer-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Two-answer review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the two-answer origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Two-answer review\n\nTwo choices answered by one change.\n' > "$home/data/$origin/report.md"
+
+  first=$(run_decisions "$home" hold "$origin" relocation \
+    --title "Choose the relocation" --reason "captain relocation choice pending" --repo sample) \
+    || fail "could not register the relocation hold"
+  second=$(run_decisions "$home" hold "$origin" one-place \
+    --title "Choose where a finding lands" --reason "captain landing choice pending" --repo sample) \
+    || fail "could not register the landing hold"
+
+  tasks_in "$home" add sample-answers-both "Apply both choices" --kind ship --repo sample >/dev/null \
+    || fail "could not create the answering work"
+  tasks_in "$home" block sample-answers-both --by "$first" >/dev/null \
+    || fail "could not record the first edge"
+  tasks_in "$home" block sample-answers-both --by "$second" >/dev/null \
+    || fail "could not record the second edge"
+  show=$(tasks_in "$home" show sample-answers-both --full)
+  assert_contains "$show" "blocked_by: \"$first,$second\"" \
+    "one task must carry both hold edges at once"
+
+  printf 'Relocate it.\n' > "$home/answer-first.txt"
+  run_decisions "$home" resolve "$origin" relocation --decision-file "$home/answer-first.txt" \
+    --routed-to sample-answers-both > "$home/two-first.out" 2> "$home/two-first.err" \
+    || fail "the first of two decisions did not close: $(cat "$home/two-first.err")"
+  show=$(tasks_in "$home" show sample-answers-both --full)
+  assert_contains "$show" "blocked_by: $second" \
+    "closing the first decision must clear only its own edge and keep the second"
+
+  printf 'Land it in one place.\n' > "$home/answer-second.txt"
+  run_decisions "$home" resolve "$origin" one-place --decision-file "$home/answer-second.txt" \
+    --routed-to sample-answers-both > "$home/two-second.out" 2> "$home/two-second.err" \
+    || fail "the second of two decisions did not close: $(cat "$home/two-second.err")"
+  show=$(tasks_in "$home" show sample-answers-both --full)
+  assert_contains "$show" "blocked_by: none" "closing both decisions must leave the work unblocked"
+  assert_contains "$show" "state: queued" "the answering work must stay dispatchable"
+
+  for show in "$first" "$second"; do
+    assert_contains "$(tasks_in "$home" show "$show" --full)" "state: done" \
+      "hold $show did not close against work that answered both decisions"
+  done
+  pass "one task carries two decision edges and each closes independently"
+}
+
 # Closing several holds in one batch is the ordinary case, not an edge case: each
 # close appends a row to Done, and Done retention archives the oldest rows to stay
 # at its limit. The routed work a batch closes against has usually completed some
@@ -1244,6 +1299,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
 test_resolve_closes_holds_whose_routed_work_completed
+test_one_task_answers_two_decisions
 test_batch_close_survives_done_retention_pruning
 test_withdraw_closes_a_hold_registered_in_error
 test_partial_close_identity_survives_done_failure
