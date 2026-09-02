@@ -1124,9 +1124,25 @@ window_for_task() {  # <task-key> [state]
 }
 
 # --- injection --------------------------------------------------------------
+# _busy_defer_age: how long escalations have been waiting on the busy guard.
+# 0 when nothing is buffered (an empty buffer has waited no time at all, unlike
+# _oldest_line_age's 999999 "no oldest item" sentinel, which would read as an
+# instant bypass). A non-empty buffer whose .since sidecar is missing reports the
+# large sentinel deliberately: the backlog is real but its age is unknown, and
+# withholding a real backlog forever is the exact failure this bound exists to
+# end, while the composer guard still decides whether the pane is safe to type
+# into.
+_busy_defer_age() {  # <buf> -> seconds the current backlog has been waiting
+  local f=$1
+  [ -s "$f" ] || { echo 0; return; }
+  [ -r "${f}.since" ] || { echo 999999; return; }
+  _oldest_line_age "$f"
+}
+
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
+# gone, the supervisor is busy within the bounded busy window, afk is inactive,
+# or the verified submit cannot
 # be confirmed after bounded retries. On non-zero the caller preserves
 # the buffer so the escalation survives for the next cycle or the catch-up flush.
 #
@@ -1143,21 +1159,6 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
-# _busy_defer_age: how long escalations have been waiting on the busy guard.
-# 0 when nothing is buffered (an empty buffer has waited no time at all, unlike
-# _oldest_line_age's 999999 "no oldest item" sentinel, which would read as an
-# instant bypass). A non-empty buffer whose .since sidecar is missing reports the
-# large sentinel deliberately: the backlog is real but its age is unknown, and
-# withholding a real backlog forever is the exact failure this bound exists to
-# end, while the composer guard still decides whether the pane is safe to type
-# into.
-_busy_defer_age() {  # <buf> -> seconds the current backlog has been waiting
-  local f=$1
-  [ -s "$f" ] || { echo 0; return; }
-  [ -r "${f}.since" ] || { echo 999999; return; }
-  _oldest_line_age "$f"
-}
-
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
   local busy_source busy_age busy_max
