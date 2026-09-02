@@ -77,10 +77,15 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 DECISION_META_LOCK=
 DECISION_META_LOCK_HELD=0
+RECONSTITUTED_HOME=
 decision_hold_cleanup() {
   if [ "$DECISION_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$DECISION_META_LOCK" || true
     DECISION_META_LOCK_HELD=0
+  fi
+  if [ -n "$RECONSTITUTED_HOME" ]; then
+    rm -rf "$RECONSTITUTED_HOME"
+    RECONSTITUTED_HOME=
   fi
 }
 trap decision_hold_cleanup EXIT
@@ -141,6 +146,78 @@ require_tasks_axi() {
 
 task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
+}
+
+# Done-retention pruning moves the oldest Done rows out of the backlog into the
+# archive that .tasks.toml names. tasks-axi archives rather than deletes, so the
+# live backlog and its archive are two halves of one backlog, and a routed task
+# pruned while a batch of closes is still running remains durable evidence that
+# the work happened. Every read below that may legitimately land on a Done row
+# therefore consults both halves, which is what keeps one close independent of
+# how much unrelated Done churn happened before or during it.
+#
+# The halves are reconstituted into one throwaway backlog that tasks-axi then
+# reads, so tasks-axi stays the only parser of a backlog row. Reading the archive
+# on its own would silently lose the evidence: tasks-axi drops a blocked-by edge
+# whose target is absent from the same file, and the hold an archived row points
+# at is still live.
+backlog_archive_path() {
+  local config="$FM_HOME/.tasks.toml" configured=''
+  if [ -f "$config" ]; then
+    configured=$(sed -n 's/^[[:space:]]*archive[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$config" | head -1)
+  fi
+  case "$configured" in
+    '') printf '%s\n' "$DATA/done-archive.md" ;;
+    /*) printf '%s\n' "$configured" ;;
+    *) printf '%s\n' "$FM_HOME/$configured" ;;
+  esac
+}
+
+# Prints a throwaway home whose backlog is the live backlog with every archived
+# row restored into its Done section, and fails when nothing is archived.
+reconstituted_home() {
+  local live archive dir
+  if [ -n "$RECONSTITUTED_HOME" ]; then
+    printf '%s\n' "$RECONSTITUTED_HOME"
+    return 0
+  fi
+  live="$DATA/backlog.md"
+  archive=$(backlog_archive_path)
+  [ -f "$live" ] && [ -f "$archive" ] || return 1
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-decision-hold.XXXXXX") || return 1
+  if ! mkdir -p "$dir/data" ||
+    ! printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/archive.md"\n' \
+      > "$dir/.tasks.toml" ||
+    ! awk -v archive="$archive" '
+        { print }
+        /^##[[:space:]]*Done[[:space:]]*$/ && restored == 0 {
+          restored = 1
+          while ((getline line < archive) > 0) {
+            if (line !~ /^##/) { print line }
+          }
+          close(archive)
+        }
+      ' "$live" > "$dir/data/backlog.md"; then
+    rm -rf "$dir"
+    return 1
+  fi
+  RECONSTITUTED_HOME=$dir
+  printf '%s\n' "$dir"
+}
+
+# Reads a task from the live backlog, then from the live backlog and its archive
+# together. Only callers that may legitimately see a Done row use this; an active
+# hold is still read live, because pruning never touches a queued row.
+task_show_archived_too() {  # <id>
+  local dir show
+  if show=$(task_show "$1"); then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  dir=$(reconstituted_home) || return 1
+  show=$(cd "$dir" && tasks-axi show "$1" --full 2>/dev/null) || return 1
+  printf '%s\n' "$show"
 }
 
 show_field() {  # <show-output> <field>
@@ -205,7 +282,7 @@ verify_hold_active() {  # <hold-id>
 
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  show=$(task_show_archived_too "$id") || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -219,7 +296,7 @@ verify_hold_resolved() {  # <hold-id>
 
 verify_hold_withdrawn() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  show=$(task_show_archived_too "$id") || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -233,7 +310,8 @@ verify_hold_withdrawn() {  # <hold-id>
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show_archived_too "$id") \
+    || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -512,7 +590,8 @@ command_resolve() {
   guard_queued_close_record "$id" resolve "$hold_body" "$decision_digest" "$routed_csv"
 
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
+    show=$(task_show_archived_too "$dep") \
+      || fail "routed task $dep does not exist in the active home"
     # A routed task that already completed still resolves. tasks-axi keeps its
     # blocked-by edge after Done, so the routing evidence the close depends on
     # survives, and finished dependent work proves the decision was acted on.
@@ -538,7 +617,11 @@ command_resolve() {
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
+    if ! show=$(task_show "$dep"); then
+      task_show_archived_too "$dep" >/dev/null \
+        || fail "routed task $dep disappeared before routing"
+      continue
+    fi
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
     blocked=${blocked#\"}
     blocked=${blocked%\"}
