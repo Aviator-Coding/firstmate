@@ -105,6 +105,11 @@
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
 #                                   alarm fires (default 300; 0 disables)
+#          FM_BUSY_DEFER_MAX_SECS   max seconds a BUSY verdict alone may withhold
+#                                   an escalation; past it the busy guard yields
+#                                   and delivery is attempted anyway, while the
+#                                   composer guard still applies unchanged
+#                                   (default 900)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -198,6 +203,16 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
+# Longest a BUSY verdict alone may withhold an escalation. The busy guard is a
+# politeness optimization (do not type over a turn in progress), not the safety
+# boundary - that is the composer guard below it, which stays absolute. A busy
+# signal read from the harness/backend can stick: the 2026-08-24, 08-25 and
+# 08-27 away-mode wedges all held a provably idle claude-on-herdr pane at
+# "working" for 8.5-12.5h, so every escalation buffered until the captain
+# returned. Bounding the guard means a stuck busy signal costs one window, not a
+# whole night, while a genuinely busy pane just receives a queued composer
+# submit the way a human typing mid-turn does.
+BUSY_DEFER_MAX_SECS_DEFAULT=900
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
@@ -580,16 +595,33 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
-pane_is_busy() {  # <target> [backend]
+# pane_busy_source: WHICH detector reports the pane busy - "native" (the
+# backend's own agent-state read), "rendered" (the harness busy footer matched in
+# the captured tail), or "none". Both detectors are independent and fail in
+# opposite directions: the native read can stick busy on an idle pane, while the
+# rendered match has known false NEGATIVES (claude's "still thinking" spinner
+# carries no elapsed-time token). Naming the source in the deferral log is what
+# makes a repeat wedge attributable from one line instead of an investigation -
+# the 08-27 log recorded 2119 identical "supervisor pane busy" lines that could
+# not distinguish the two paths at all.
+pane_busy_source() {  # <target> [backend] -> native|rendered|none
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
-    busy) return 0 ;;
+    busy) printf 'native'; return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || { printf 'none'; return 0; }
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
+    | fm_busy_lines_match "$harness"; then
+    printf 'rendered'
+  else
+    printf 'none'
+  fi
+}
+
+pane_is_busy() {  # <target> [backend]
+  [ "$(pane_busy_source "$@")" != none ]
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -1111,8 +1143,24 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
+# _busy_defer_age: how long escalations have been waiting on the busy guard.
+# 0 when nothing is buffered (an empty buffer has waited no time at all, unlike
+# _oldest_line_age's 999999 "no oldest item" sentinel, which would read as an
+# instant bypass). A non-empty buffer whose .since sidecar is missing reports the
+# large sentinel deliberately: the backlog is real but its age is unknown, and
+# withholding a real backlog forever is the exact failure this bound exists to
+# end, while the composer guard still decides whether the pane is safe to type
+# into.
+_busy_defer_age() {  # <buf> -> seconds the current backlog has been waiting
+  local f=$1
+  [ -s "$f" ] || { echo 0; return; }
+  [ -r "${f}.since" ] || { echo 999999; return; }
+  _oldest_line_age "$f"
+}
+
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local busy_source busy_age busy_max
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1133,10 +1181,23 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
-    return 1
+  # (3) Busy-guard, BOUNDED: hold off while the supervisor pane is in use, but
+  #     never let a busy verdict alone withhold delivery indefinitely. Past
+  #     BUSY_DEFER_MAX_SECS of continuously-buffered escalation the guard yields
+  #     and delivery is attempted anyway; the composer guard below is the real
+  #     safety boundary and still applies unchanged, so a dead shell or a pane
+  #     with pending human input is still never typed into. A genuinely busy
+  #     agent composer accepts the submit and queues it, exactly as it does when
+  #     a human types mid-turn.
+  busy_source=$(pane_busy_source "$target" "$backend")
+  if [ "$busy_source" != none ]; then
+    busy_age=$(_busy_defer_age "$state/.subsuper-escalations")
+    busy_max=${FM_BUSY_DEFER_MAX_SECS:-$BUSY_DEFER_MAX_SECS_DEFAULT}
+    if [ "$busy_age" -lt "$busy_max" ]; then
+      log "inject deferred: supervisor pane busy (source=$busy_source; buffered ${busy_age}s of ${busy_max}s bound)"
+      return 1
+    fi
+    log "inject proceeding despite busy (source=$busy_source): buffered ${busy_age}s exceeds ${busy_max}s bound; composer guard still applies"
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
   #      composer. The shared classifier (fm_backend_composer_state ->
