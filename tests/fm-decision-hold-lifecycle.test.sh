@@ -1293,7 +1293,7 @@ EOF
 # archive; the retry body reload must too, or set -e exits silently on live-only
 # task_show before the identity checks run.
 test_archived_hold_retry_stays_idempotent_and_identity_safe() {
-  local home origin hold show out err
+  local home origin hold show out
 
   # Resolved hold ages out of Done, then exact and drifted retries.
   home=$(make_home archived-resolve-retry)
@@ -1410,7 +1410,7 @@ EOF
 # must still refuse with the durable resolved/withdrawn errors rather than
 # recreating a fresh queued/held captain item. Open-hold re-hold stays idempotent.
 test_archived_closed_hold_refuses_rehold() {
-  local home origin hold show out err state held
+  local home origin hold show out state held
 
   # Open hold re-hold stays idempotent on the live-first path.
   home=$(make_home open-hold-rehold)
