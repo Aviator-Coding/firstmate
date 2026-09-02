@@ -1142,9 +1142,9 @@ _busy_defer_age() {  # <buf> -> seconds the current backlog has been waiting
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
 # gone, the supervisor is busy within the bounded busy window, afk is inactive,
-# or the verified submit cannot
-# be confirmed after bounded retries. On non-zero the caller preserves
-# the buffer so the escalation survives for the next cycle or the catch-up flush.
+# or the verified submit cannot be confirmed after bounded retries. On non-zero
+# the caller preserves the buffer so the escalation survives for the next cycle
+# or the catch-up flush.
 #
 # Submit model:
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
