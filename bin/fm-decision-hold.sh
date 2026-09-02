@@ -41,11 +41,13 @@
 # should never have been asked.
 #
 # `resolve` closes a hold the captain answered. It requires every --routed-to task
-# to exist and to be blocked by the hold. Routed work that has already completed
-# still resolves, because a finished dependency is stronger evidence the decision
-# was acted on than a pending one. It writes the captain decision and routed
-# identities into the hold body, clears those dependency edges, and only then marks
-# the hold Done.
+# to exist and to be blocked by the hold. Existence includes a Done row that Done
+# retention has already moved into the archive named by .tasks.toml, because that
+# archive is the other half of the same backlog rather than a delete log. Routed
+# work that has already completed still resolves, because a finished dependency is
+# stronger evidence the decision was acted on than a pending one. It writes the
+# captain decision and routed identities into the hold body, clears live dependency
+# edges, and only then marks the hold Done.
 #
 # `withdraw` closes a hold that should never have been asked, such as a duplicate
 # registration or a choice already taken and executed elsewhere. Use it only when
