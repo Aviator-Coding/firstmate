@@ -644,6 +644,17 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+The Claude/Herdr supervisor-pane busy verdict was measured on Herdr 0.8.0 with Claude Opus 5, against a real primary pane whose turn had ended while a tracked background job stayed alive:
+
+```sh
+herdr --session default agent get <pane> | jq -r '.result.agent.agent_status'
+# idle
+```
+
+Observed guarantees: an idle Claude pane reports native `idle`, matches no rendered busy footer, and classifies its composer `empty`, so away-mode delivery is safe in exactly the state the 2026-08-24/25/27 wedges refused.
+A live background job in that pane, silent or writing to stdout, does not make it read busy, so the daemon's own presence is not the cause.
+The stuck-`working` limitation this bound exists for is recorded in [`herdr-backend.md`](../herdr-backend.md) "Active limits"; `tests/fm-daemon.test.sh` pins the bound and `tests/fm-afk-inject-herdr-e2e.test.sh` covers the real-Herdr transport.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

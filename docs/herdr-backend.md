@@ -312,6 +312,9 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Mid-session secondmate liveness is not implemented.
 - OpenCode 1.18.4 can accept Enter while busy without clearing the composer.
   The tmux backend has a busy-queue fallback, but Herdr still reports this case as submit pending and needs a separate adapter fix.
+- Herdr's native agent-state read can stay `working` on a pane whose agent has actually gone idle.
+  Observed three times in away mode (2026-08-24, 08-25, 08-27), each time holding the primary pane busy for 8.5-12.5h while its session transcript recorded no turns at all, so every away-mode escalation buffered until the captain returned.
+  The away daemon therefore bounds how long a busy verdict alone may withhold delivery; `bin/fm-supervise-daemon.sh`'s header owns that bound and its `FM_BUSY_DEFER_MAX_SECS` override.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points

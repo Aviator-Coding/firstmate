@@ -1725,7 +1725,8 @@ test_inject_msg_herdr_busy_guard_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
-    pane_is_busy() { return 0; }
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'busy'; }
     fm_backend_composer_state() { fail "composer_state should not be consulted once the busy-guard already deferred"; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the busy-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1742,7 +1743,9 @@ test_inject_msg_herdr_composer_guard_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    pane_is_busy() { return 1; }
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'done 12:40 PM\n'; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1759,7 +1762,7 @@ test_inject_msg_herdr_pane_gone_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 1; }
-    pane_is_busy() { fail "busy guard should not be consulted once the pane-exists check already failed"; }
+    pane_busy_source() { fail "busy guard should not be consulted once the pane-exists check already failed"; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the pane does not exist"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:gone" inject_msg "hello" "$state"; then
       fail "inject_msg should defer when the herdr target does not exist"
@@ -1775,7 +1778,9 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    pane_is_busy() { return 1; }
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'done 12:40 PM\n'; }
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
@@ -1800,7 +1805,9 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    pane_is_busy() { return 1; }
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'done 12:40 PM\n'; }
     fm_backend_composer_state() { printf 'unknown'; }
     fm_backend_send_text_submit() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1810,6 +1817,123 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   pass "inject_msg: defers on a dead-shell/unreadable composer (unknown), never typing the escalation into a shell"
 }
 
+# --- bounded busy guard (away-mode inject wedge, 2026-08-24/25/27) ----------
+# A busy verdict is a politeness optimization, not the safety boundary. The
+# backend's native busy read can stick "working" on a provably idle pane, which
+# held every overnight escalation until the captain returned. These pin the
+# bound: inside the window the guard behaves exactly as before, past it delivery
+# wins, and the composer guard stays absolute either way.
+
+# Buffer <secs> worth of already-waiting escalations into <state>.
+seed_aged_backlog() {  # <state> <secs>
+  printf 'crew blocked\n' > "$1/.subsuper-escalations"
+  echo $(( $(date +%s) - $2 )) > "$1/.subsuper-escalations.since"
+}
+
+test_inject_msg_busy_bound_delivers_aged_backlog() {
+  local dir state
+  dir=$(make_supercase inject-busy-bound-delivers)
+  state="$dir/state"
+  afk_enter "$state"
+  seed_aged_backlog "$state" 5000
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'empty'; }
+    FM_BUSY_DEFER_MAX_SECS=900 FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      inject_msg "hello" "$state" \
+      || fail "inject_msg must deliver once a busy verdict has withheld the backlog past the bound"
+  ) || fail "busy-bound delivery subshell failed"
+  pass "inject_msg: a busy verdict alone stops withholding an aged backlog past the bound"
+}
+
+test_inject_msg_busy_bound_holds_fresh_backlog() {
+  local dir state
+  dir=$(make_supercase inject-busy-bound-holds)
+  state="$dir/state"
+  afk_enter "$state"
+  seed_aged_backlog "$state" 30
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_composer_state() { fail "composer_state must not be consulted while the busy guard still holds"; }
+    fm_backend_send_text_submit() { fail "send_text_submit must not run while the busy guard still holds"; }
+    if FM_BUSY_DEFER_MAX_SECS=900 FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      inject_msg "hello" "$state"; then
+      fail "inject_msg must still defer to a busy pane inside the bound"
+    fi
+  ) || fail "busy-bound hold subshell failed"
+  pass "inject_msg: inside the bound a busy pane defers exactly as before"
+}
+
+test_inject_msg_busy_bound_never_overrides_composer_guard() {
+  local dir state composer
+  dir=$(make_supercase inject-busy-bound-composer)
+  state="$dir/state"
+  afk_enter "$state"
+  seed_aged_backlog "$state" 5000
+  for composer in unknown pending; do
+    (
+      fm_backend_target_exists() { return 0; }
+      fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'busy'; }
+      eval "fm_backend_composer_state() { printf '%s' '$composer'; }"
+      fm_backend_send_text_submit() { fail "send_text_submit must never run for composer=$composer, however long the backlog waited"; }
+      if FM_BUSY_DEFER_MAX_SECS=900 FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+        inject_msg "hello" "$state"; then
+        fail "inject_msg must defer on composer=$composer even past the busy bound"
+      fi
+    ) || fail "busy-bound composer-guard subshell failed for composer=$composer"
+  done
+  pass "inject_msg: passing the busy bound never relaxes the composer guard (dead shell and pending input still refuse)"
+}
+
+test_inject_msg_empty_backlog_is_not_an_aged_backlog() {
+  local dir state
+  dir=$(make_supercase inject-busy-bound-empty)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_send_text_submit() { fail "an empty backlog has waited no time and must not bypass the busy guard"; }
+    if FM_BUSY_DEFER_MAX_SECS=900 FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      inject_msg "hello" "$state"; then
+      fail "inject_msg must defer to a busy pane when nothing has been buffered"
+    fi
+  ) || fail "empty-backlog busy-guard subshell failed"
+  pass "inject_msg: an empty backlog reads as zero wait, not as an instant bypass"
+}
+
+test_pane_busy_source_names_the_deciding_detector() {
+  (
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { fail "the rendered tail must not be captured once the native read already decided busy"; }
+    [ "$(pane_busy_source "default:w1:p2" herdr)" = native ] \
+      || fail "pane_busy_source should attribute a native busy read to 'native'"
+  ) || fail "pane_busy_source native subshell failed"
+  (
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'Thinking… (5s · esc to interrupt)\n'; }
+    [ "$(pane_busy_source "default:w1:p2" herdr)" = rendered ] \
+      || fail "pane_busy_source should attribute a busy footer match to 'rendered'"
+  ) || fail "pane_busy_source rendered subshell failed"
+  (
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'Cogitated for 15s · done 12:40 PM\n'; }
+    [ "$(pane_busy_source "default:w1:p2" herdr)" = none ] \
+      || fail "an idle pane with no busy footer should report 'none'"
+  ) || fail "pane_busy_source none subshell failed"
+  pass "pane_busy_source: names which detector decided, so a repeat wedge is attributable from the log"
+}
+
 test_inject_msg_defers_on_unrecognized_composer_state() {
   local dir state
   dir=$(make_supercase inject-future-composer-state)
@@ -1817,7 +1941,9 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    pane_is_busy() { return 1; }
+    fm_daemon_primary_harness() { printf 'claude'; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'done 12:40 PM\n'; }
     fm_backend_composer_state() { printf 'future-state'; }
     fm_backend_send_text_submit() { fail "send_text_submit must not run for an unrecognized composer state"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1926,3 +2052,8 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_inject_msg_busy_bound_delivers_aged_backlog
+test_inject_msg_busy_bound_holds_fresh_backlog
+test_inject_msg_busy_bound_never_overrides_composer_guard
+test_inject_msg_empty_backlog_is_not_an_aged_backlog
+test_pane_busy_source_names_the_deciding_detector
