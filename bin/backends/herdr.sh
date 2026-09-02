@@ -2617,6 +2617,12 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 # herdr's `pane send-keys` names. Verified empirically: enter, escape/esc, and
 # both ctrl+c/C-c all work (case-insensitive on herdr's side, but normalize
 # explicitly rather than relying on that).
+#
+# Beyond the two named controls above, this also rewrites any tmux-style
+# `C-x` (single character) to herdr's `ctrl+x` spelling - a name translation
+# only. It does not change which keys herdr can actually deliver: a
+# multi-character or otherwise unmapped name (e.g. `C-Tab`) falls through
+# unchanged and still fails on herdr's side if herdr cannot deliver it.
 fm_backend_herdr_normalize_key() {  # <key>
   case "$1" in
     Enter|enter) printf 'enter' ;;
@@ -2625,6 +2631,7 @@ fm_backend_herdr_normalize_key() {  # <key>
     # C-u clears a composer line. fm-send.sh's muse interrupt path needs it to
     # drop the prompt muse restores into the composer after Escape.
     C-u|c-u|ctrl+u|Ctrl+U) printf 'ctrl+u' ;;
+    [Cc]-?) printf 'ctrl+%s' "$(printf '%s' "${1#??}" | tr '[:upper:]' '[:lower:]')" ;;
     *) printf '%s' "$1" ;;
   esac
 }

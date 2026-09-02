@@ -2975,6 +2975,22 @@ test_normalize_key() {
   pass "fm_backend_herdr_normalize_key: Enter/Escape/C-c map to herdr's verified enter/escape/ctrl+c"
 }
 
+test_normalize_key_general_ctrl() {
+  ( . "$ROOT/bin/backends/herdr.sh"
+    [ "$(fm_backend_herdr_normalize_key C-o)" = ctrl+o ] || exit 1
+    [ "$(fm_backend_herdr_normalize_key c-o)" = ctrl+o ] || exit 1
+    [ "$(fm_backend_herdr_normalize_key C-A)" = ctrl+a ] || exit 1
+    # Already-mapped names keep their exact existing outputs, not the general fallback.
+    [ "$(fm_backend_herdr_normalize_key C-c)" = ctrl+c ] || exit 1
+    [ "$(fm_backend_herdr_normalize_key C-u)" = ctrl+u ] || exit 1
+    # A multi-character tmux-style name (e.g. C-Tab) is not a single-character
+    # control key: it falls through unchanged rather than being invented, so a
+    # key herdr genuinely cannot deliver still fails clearly on herdr's side.
+    [ "$(fm_backend_herdr_normalize_key C-Tab)" = C-Tab ] || exit 1
+  ) || fail "fm_backend_herdr_normalize_key did not generalise C-x to ctrl+x for single-character keys"
+  pass "fm_backend_herdr_normalize_key: C-x normalises to ctrl+x for any single character, without inventing unmapped multi-character names"
+}
+
 # --- capture / send_key / kill / current_path --------------------------------
 
 test_capture_calls_pane_read() {
@@ -4440,6 +4456,7 @@ test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key
+test_normalize_key_general_ctrl
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
