@@ -83,6 +83,10 @@ decision_hold_cleanup() {
     fm_lock_release "$DECISION_META_LOCK" || true
     DECISION_META_LOCK_HELD=0
   fi
+  discard_reconstituted_home
+}
+
+discard_reconstituted_home() {
   if [ -n "$RECONSTITUTED_HOME" ]; then
     rm -rf "$RECONSTITUTED_HOME"
     RECONSTITUTED_HOME=
@@ -135,6 +139,12 @@ hold_id() {  # <origin-id> <decision-key>
 }
 
 tasks_axi() {
+  case "${1:-}" in
+    show) : ;;
+    # Every other verb can move a row between the backlog and its archive, so the
+    # snapshot that reconstitutes the two halves below is rebuilt, never reused.
+    *) discard_reconstituted_home ;;
+  esac
   (cd "$FM_HOME" && tasks-axi "$@")
 }
 
