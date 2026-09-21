@@ -33,7 +33,16 @@ A configured remote secondmate reply source is armed and handled through `bin/fm
 Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
 A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+For a plain local blocking command with no adapter of its own:
+
+```sh
+bin/fm-procevent-longpoll.sh arm <source-id> -- <argv>...
+```
+
+It is never terminal on its own result, so it stays armed until you explicitly retire it with `bin/fm-procevent-longpoll.sh retire <source-id>`.
+**A source armed through it keeps supervision required in this home until it is retired.**
+
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, and `bin/fm-procevent-longpoll.sh --help` own the exact commands and flags.
 
 Two rules the commands cannot enforce for you:
 

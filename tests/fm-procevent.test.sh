@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Behavior tests for the generic process-to-event runner and its Lavish adapter.
+# Behavior tests for the generic process-to-event runner, its Lavish adapter,
+# and its longpoll adapter.
 #
 # The source under test is a fake blocking process that returns only when its
 # trigger file appears, so completion is a real process event and no test here
 # depends on a discovery timer. The Lavish adapter is exercised through its own
 # public commands against the currently published poll shape; no live Lavish
-# server is started.
+# server is started. The longpoll adapter wraps that same fake blocking process
+# directly, since it has no adapter-specific interface of its own to fake.
 #
 # Delivery is deliberately NOT asserted as at-least-once or lossless: the
 # published Lavish poll clears feedback destructively before returning it, so
@@ -1099,5 +1101,90 @@ assert_contains "$runner_help" "Durability boundary" \
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
+
+# --- the longpoll adapter arms a plain local blocking command ---------------
+lp() { FM_HOME="$1" "$ROOT/bin/fm-procevent-longpoll.sh" "${@:2}"; }
+lp_arm() {  # <home> <source-id> -- <argv>...
+  local home=$1 id=$2
+  shift 2
+  PE_TRACKED+=("$home|$id")
+  lp "$home" arm "$id" "$@"
+}
+
+HLP="$TMP_ROOT/hlp"; new_home "$HLP"
+TRIGLP="$TMP_ROOT/trigger-longpoll"
+out=$(lp_arm "$HLP" lp-src -- "$BLOCKER" "$TRIGLP" "news update")
+assert_contains "$out" "armed: lp-src" "arm registers the source through the generic runner"
+pe "$HLP" reconcile >/dev/null
+: > "$TRIGLP"
+wait_for "$HLP/state/.wake-queue" || fail "no event was published after the longpoll source completed"
+payload=$(wake_payloads "$HLP")
+assert_contains "$payload" "procevent longpoll lp-src 1" "the longpoll adapter's completion publishes a normalized event"
+LP_RESULT=$(first_result "$HLP" lp-src || true)
+[ -n "$LP_RESULT" ] || fail "no durable result was captured for the longpoll source"
+assert_grep 'news update' "$LP_RESULT" "the captured result holds the source output verbatim"
+pass "the longpoll adapter arms a plain local command through the generic runner"
+
+# --- terminal always refuses: a long-poll source never ends on its own ------
+assert_contains "$(lp "$HLP" classify "$LP_RESULT")" news \
+  "classify reads its token from the captured result, not invented"
+lp "$HLP" terminal "$LP_RESULT" \
+  && fail "a well-formed longpoll result was reported terminal"
+EMPTY_RESULT="$TMP_ROOT/lp-empty-result"
+: > "$EMPTY_RESULT"
+lp "$HLP" terminal "$EMPTY_RESULT" \
+  && fail "an empty longpoll result was reported terminal"
+lp "$HLP" terminal "$TMP_ROOT/lp-missing-result" \
+  && fail "a missing longpoll result was reported terminal"
+pass "the longpoll adapter never reports a captured result terminal: well-formed, empty, or missing"
+
+# --- classify never invents a token and never crashes ------------------------
+assert_contains "$(lp "$HLP" classify "$EMPTY_RESULT")" unknown \
+  "an empty result classifies unknown rather than crashing"
+missing_out=$(lp "$HLP" classify "$TMP_ROOT/lp-missing-result" 2>&1)
+assert_contains "$missing_out" unknown "a missing result classifies unknown with no traceback"
+assert_not_contains "$missing_out" "line " "classify prints no shell traceback for a missing result"
+pass "the longpoll adapter classifies a result without inventing a state or crashing"
+
+# --- arm refuses unsafe input by name ----------------------------------------
+unsafe_status=0
+unsafe_out=$(lp "$HLP" arm "../escape" -- /bin/echo hi 2>&1) || unsafe_status=$?
+[ "$unsafe_status" -ne 0 ] || fail "arm accepted a path-unsafe source id"
+assert_contains "$unsafe_out" "source id" "arm names the source id as the reason for refusing an unsafe id"
+
+empty_argv_status=0
+empty_argv_out=$(lp "$HLP" arm lp-empty-argv -- 2>&1) || empty_argv_status=$?
+[ "$empty_argv_status" -ne 0 ] || fail "arm accepted an empty argv"
+assert_contains "$empty_argv_out" "argv" "arm names the empty argv as the reason for refusing it"
+pass "arm refuses an unsafe source id and an empty argv, each by name"
+
+# --- arm then retire leaves nothing behind; a second retire still succeeds --
+out=$(lp_arm "$HLP" lp-retire-src -- /bin/echo retire-me)
+assert_contains "$out" "armed: lp-retire-src" "arm registers a fresh source for the retire round-trip"
+assert_present "$HLP/state/procevent/lp-retire-src.source" "the registration exists right after arming"
+out=$(lp "$HLP" retire lp-retire-src)
+assert_contains "$out" "retired: lp-retire-src" "retire drops the registration"
+assert_absent "$HLP/state/procevent/lp-retire-src.source" "no registration remains after retire"
+out=$(lp "$HLP" retire lp-retire-src)
+assert_contains "$out" "retired: lp-retire-src" "a second retire on an already-retired source still succeeds"
+pass "arm then retire leaves no registration behind, and retire is idempotent"
+
+# --- an argv element with a space and a shell metacharacter is never re-split
+HLP2="$TMP_ROOT/hlp2"; new_home "$HLP2"
+TRIGLP2="$TMP_ROOT/trigger-longpoll-argv"
+# shellcheck disable=SC2016  # single quotes are deliberate: this must never expand.
+METACHAR_ARG='one two; rm -rf /tmp/lp-should-not-run && echo $(pwned)'
+out=$(lp_arm "$HLP2" lp-argv-src -- "$BLOCKER" "$TRIGLP2" "$METACHAR_ARG")
+assert_contains "$out" "armed: lp-argv-src" "arm registers the metacharacter-carrying source"
+pe "$HLP2" reconcile >/dev/null
+: > "$TRIGLP2"
+wait_for "$HLP2/state/.wake-queue" || fail "no event was published after the metacharacter argv source completed"
+LP_ARGV_RESULT=$(first_result "$HLP2" lp-argv-src || true)
+[ -n "$LP_ARGV_RESULT" ] || fail "no durable result was captured for the metacharacter argv source"
+# shellcheck disable=SC2016  # single quotes are deliberate: this must never expand.
+assert_grep 'one two; rm -rf /tmp/lp-should-not-run && echo $(pwned)' "$LP_ARGV_RESULT" \
+  "the metacharacter argument survived as one literal, unexecuted, unsplit argument"
+assert_absent /tmp/lp-should-not-run "no shell interpretation occurred"
+pass "an argv element with a space and a shell metacharacter is never re-split or executed"
 
 printf '\nall procevent tests passed\n'
