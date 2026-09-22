@@ -40,13 +40,16 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # absorbs them only with positive provably-working evidence, while the daemon uses
 # its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
 # needs a custom verb vocabulary; absent, this default applies.
+# ready: is a no-mistakes ship's validation handoff (implemented and committed,
+# awaiting firstmate's validation trigger; bin/fm-brief.sh): it ends the worker's
+# turn and needs firstmate, but it is never a delivered done.
 #
 # Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
 # legacy lines that lack a standard terminal verb. status_is_captain_relevant is
 # verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
 # merely because its prose contains one of those tokens (for example
 # "working: rebased onto merged #76").
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|ready:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -85,14 +88,14 @@ last_status_line() {
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
-# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
+# (done, ready, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    done|needs-decision|blocked|failed) return 0 ;;
+    done|ready|needs-decision|blocked|failed) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -114,10 +117,27 @@ status_is_captain_relevant() {
   esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
+      done|ready|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+}
+
+# 0 if <status-line> is a done: event written before <mode>'s definition of done
+# was met: a no-mistakes or direct-PR ship's done: must carry its https:// PR URL
+# (bin/fm-brief.sh). Such a line is not delivery; the worker needs a steer to
+# finish its mode's path. Any other verb, a local-only ship, or a task with no
+# delivery mode (scout, secondmate) returns 1.
+status_done_is_premature() {  # <status-line> <mode>
+  [ "$(status_line_verb "$1")" = done ] || return 1
+  case "$2" in
+    no-mistakes|direct-PR) ;;
+    *) return 1 ;;
+  esac
+  case "$(status_line_note "$1")" in
+    *https://*) return 1 ;;
+  esac
+  return 0
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -584,7 +604,7 @@ EOF
 
 # Fold material routed-work phases in the same keyed event stream.
 # A working or declared-pause event opens or replaces one phase for its key.
-# A later done, failed, needs-decision, blocked, or resolved event carrying that
+# A later done, ready, failed, needs-decision, blocked, or resolved event carrying that
 # key closes the phase, because it has moved to a terminal or separately tracked
 # state.
 # A bare legacy event uses the default key, preserving one-phase behavior.
@@ -611,7 +631,7 @@ _fm_status_open_activities_stream() {
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
+      done|ready|failed|needs-decision|blocked|"$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;

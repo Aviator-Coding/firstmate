@@ -62,6 +62,11 @@
 #      unknown with the status text and the idle liveness verdict rather than
 #      working. kind=secondmate skips the busy check (idle pane is healthy) and
 #      still reads working: from the status log.
+#      A no-mistakes ship's ready: validation handoff reports parked: the worker
+#      stopped at a gate only firstmate's validation trigger opens. A done: that
+#      fm-classify-lib.sh's status_done_is_premature flags for the task's mode
+#      (a no-mistakes or direct-PR done: without its PR URL) reports blocked with
+#      a "premature done" detail, never done: it needs a steer, not delivery.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -120,6 +125,7 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+MODE=$(meta_value mode)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read.
@@ -138,15 +144,20 @@ log_last_line() {
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
 # a crew with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
-# and its reason rather than a wedge-suspect idle.
+# and its reason rather than a wedge-suspect idle. ready and a premature done map
+# as the header's step 4 describes.
 map_log_state() {  # <line>
   if status_is_paused "$1"; then
     echo paused
     return
   fi
+  if status_done_is_premature "$1" "$MODE"; then
+    echo blocked
+    return
+  fi
   case "$(status_line_verb "$1")" in
     working)        echo working ;;
-    needs-decision) echo parked ;;
+    needs-decision|ready) echo parked ;;
     blocked)        echo blocked ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
@@ -262,6 +273,7 @@ nm_gate_findings_count() {
 }
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
+  ! status_done_is_premature "$LOG_LINE" "$MODE" || return 1
   case "$(status_line_note "$LOG_LINE")" in
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
     *) return 1 ;;
@@ -662,6 +674,8 @@ if [ -n "$LOG_VERB" ]; then
   if [ "$LOG_STATE" != unknown ]; then
     if [ "$LOG_STATE" = working ] && [ "${BUSY_VERDICT%% *}" = idle ]; then
       emit unknown status-log "${LOG_LINE}${SEP}harness idle (${BUSY_VERDICT#* })"
+    elif status_done_is_premature "$LOG_LINE" "$MODE"; then
+      emit "$LOG_STATE" status-log "premature done: mode=$MODE requires the PR URL in done:, steer the worker to finish delivery${SEP}$(status_line_note "$LOG_LINE")"
     else
       emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
     fi
