@@ -710,6 +710,7 @@ crew_absorb_class() {  # <id>
     case "$line" in
       state:*)
         state=${line#state: }; state=${state%% *}
+        # shellcheck disable=SC2034 # Read by fm-watch.sh's pr_merge_wait_holds, not this lib.
         CREW_ABSORB_STATE=$state
         if [ "$state" = paused ]; then
           CREW_ABSORB_CLASS=paused
