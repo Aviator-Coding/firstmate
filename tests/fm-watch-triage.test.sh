@@ -1187,6 +1187,20 @@ test_pr_merge_wait_is_bounded_not_a_wedge() {
     grep -F "possible wedge" "$out" >/dev/null && fail "[$status] the PR merge recheck was labeled a possible wedge"
     [ "$(stale_wake_count "$state" "$window")" -eq 1 ] \
       || fail "[$status] the PR merge recheck queued more than one stale wake"
+
+    # The recheck is spent once per window, not once per pane repaint.
+    round=1
+    while [ "$round" -le 2 ]; do
+      printf 'awaiting merge (after recheck %s)\n' "$round" > "$capture_file"
+      result=$(paused_cadence_round "$state" "$fakebin" "$window" "$capture_file" "$out" grok \
+        'state: working · source: run-step · ci running · run=01PRWAIT' \
+        FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=240)
+      [ "$result" = alive ] \
+        || fail "[$status] repaint round $round re-surfaced the PR merge recheck inside its window: $(cat "$out")"
+      round=$((round + 1))
+    done
+    [ "$(stale_wake_count "$state" "$window")" -eq 1 ] \
+      || fail "[$status] idle-pane repaints flooded the PR merge recheck"
   done
   pass "an idle crew whose PR has an armed merge poll is rechecked on the bounded cadence, never wedge-escalated"
 }
