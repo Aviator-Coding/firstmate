@@ -1167,15 +1167,16 @@ EOF
                 write_active_run "$arf" "${pause_class_out#working }"
                 triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
                 ;;
-              paused)
-                handle_paused_stale "$w" "$task" "$h"
-                ;;
               *)
-                fm_wake_append stale "$w" "stale: $w" || exit 1
-                printf '%s' "$h" > "$sf"
-                rm -f "$ssf" "$arf"
-                mark_surfaced "$STATE/$task.status"
-                wake "stale: $w"
+                if [ "$pause_class_out" = paused ] && pr_merge_wait_armed "$task"; then
+                  handle_paused_stale "$w" "$task" "$h"
+                else
+                  fm_wake_append stale "$w" "stale: $w" || exit 1
+                  printf '%s' "$h" > "$sf"
+                  rm -f "$ssf" "$arf"
+                  mark_surfaced "$STATE/$task.status"
+                  wake "stale: $w"
+                fi
                 ;;
             esac
           elif [ -e "$pf" ]; then
