@@ -751,8 +751,11 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # Print supplemental drain-time context only after the caller has committed the
 # raw queue consumption and released the append lock. The limits are constants,
 # so status-file volume cannot turn a drain into an unbounded context read.
+# When the caller also sourced fm-classify-lib.sh, an event that its
+# status_done_is_premature flags for the task's recorded delivery mode is tagged
+# ahead of the event text, so the tag survives the per-item cut.
 fm_wake_print_annotations() {  # <deduped-raw-rows>
-  local rows=$1 manifest status_key mode path prefix line suffix keep bytes
+  local rows=$1 manifest status_key mode path prefix line suffix keep bytes meta task_mode tag
   local output='' used=0 omitted=0 read_omitted=0 annotation_marker marker_reserve=192
   local tail_bytes=8192 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0
   local LC_ALL=C
@@ -794,7 +797,16 @@ fm_wake_print_annotations() {  # <deduped-raw-rows>
     if [ "$mode" = historical ]; then
       prefix="$prefix; historical / not necessarily the triggering event"
     fi
-    line="$prefix: $status_key: $FM_WAKE_EVENT_LINE"
+    tag=''
+    meta="$STATE/${status_key%.status}.meta"
+    if [ "$FM_WAKE_EVENT_TRUNCATED" = false ] && declare -F status_done_is_premature >/dev/null \
+      && [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      task_mode=$(grep '^mode=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-) || task_mode=''
+      if status_done_is_premature "$FM_WAKE_EVENT_LINE" "$task_mode"; then
+        tag="[premature done: mode=$task_mode requires the PR URL in done:, steer the worker to finish delivery] "
+      fi
+    fi
+    line="$prefix: $status_key: $tag$FM_WAKE_EVENT_LINE"
     suffix=''
     [ "$FM_WAKE_EVENT_TRUNCATED" = false ] || suffix=' [truncated]'
     line="$line$suffix"

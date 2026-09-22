@@ -300,6 +300,35 @@ SH
   pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
 }
 
+# A done: whose task mode needs a PR URL it lacks is tagged ahead of the event
+# text, so firstmate reading the drain sees a steer, not a delivery.
+test_premature_done_annotation_tagged() {
+  local dir state out
+  dir=$(make_case premature-done)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'mode=no-mistakes\nkind=ship\n' > "$state/early.meta"
+  printf 'done: implemented, 3 commits on fm/early\n' > "$state/early.status"
+  printf 'mode=no-mistakes\nkind=ship\n' > "$state/shipped.meta"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$state/shipped.status"
+  printf 'mode=local-only\nkind=ship\n' > "$state/local.meta"
+  printf 'done: ready in branch fm/local, not pushed\n' > "$state/local.status"
+  append_wake "$state" signal early.status "signal: early" || fail "early wake append failed"
+  append_wake "$state" signal shipped.status "signal: shipped" || fail "shipped wake append failed"
+  append_wake "$state" signal local.status "signal: local" || fail "local wake append failed"
+  # The metadata makes these read as in-flight tasks, so keep the drain's
+  # expected no-watcher supervision warning out of the test output.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "drain failed"
+  grep -F 'early.status: [premature done: mode=no-mistakes requires the PR URL in done:' "$out" >/dev/null \
+    || fail "URL-less no-mistakes done: was not tagged premature"
+  grep -F 'shipped.status: done: PR https://github.com/o/r/pull/9 checks green' "$out" >/dev/null \
+    || fail "no-mistakes done: with its PR URL was not annotated verbatim"
+  grep -F 'local.status: done: ready in branch fm/local, not pushed' "$out" >/dev/null \
+    || fail "local-only done: was not annotated verbatim"
+  [ "$(grep -c 'premature done' "$out")" -eq 1 ] || fail "a delivered done: was tagged premature"
+  pass "drain annotation tags a URL-less PR-mode done: as premature and leaves delivered ones alone"
+}
+
 test_enrichment_caps_and_status_file_failures() {
   local dir state out fake_perl_log perl_bin i raw_count annotation_bytes annotation_count oversized_lines perl_reads
   dir=$(make_case caps)
@@ -446,6 +475,7 @@ test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
+test_premature_done_annotation_tagged
 test_enrichment_caps_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_interruption_before_and_after_raw_commit
