@@ -6,9 +6,12 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# working signal is never silently swallowed. A declared external-wait pause, or
+# an idle ship crew whose PR has an armed validated merge poll (pr_merge_wait_holds),
+# is the separate idle absorb case and re-surfaces only on its long bounded
+# cadence; a declared pause's initial no-verb status signal still surfaces in
+# normal mode, while a holding PR merge wait owes no first surface because the
+# PR-ready report already reached firstmate.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -19,18 +22,20 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
-#                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
-#                          consecutive escalations on the SAME pane, the reason
-#                          also carries a "demand-deep-inspection" marker so the
-#                          wake payload itself, not just repetition, forces a
-#                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A genuinely busy pane
+#                          external-wait pause, or a live crew only waiting on its
+#                          open PR's armed merge poll, is absorbed instead with the
+#                          long PAUSE_RESURFACE_SECS cadence, never as a wedge. Only
+#                          when neither absorb class applies does the log's last line
+#                          decide: terminal (captain-relevant) or non-terminal (no
+#                          verb), both surfaced at once. A provably-working stale
+#                          past the wedge threshold also surfaces, with an
+#                          "escalation N" count in the reason; at
+#                          FM_WEDGE_DEMAND_INSPECT_COUNT consecutive escalations
+#                          on the SAME pane, the reason also carries a
+#                          "demand-deep-inspection" marker so the wake payload
+#                          itself, not just repetition, forces a closer look
+#                          instead of another routine supervision resume. Unless
+#                          afk is active. A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
