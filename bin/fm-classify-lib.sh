@@ -129,7 +129,7 @@ status_is_captain_relevant() {
 # finish its mode's path. Any other verb, a local-only ship, or a task with no
 # delivery mode (scout, secondmate) returns 1.
 status_done_is_premature() {  # <status-line> <mode>
-  [ "$(status_line_verb "$1")" = done ] || return 1
+  [ "$(status_line_verb "$1")" = "done" ] || return 1
   case "$2" in
     no-mistakes|direct-PR) ;;
     *) return 1 ;;
