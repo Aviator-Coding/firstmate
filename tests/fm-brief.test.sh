@@ -354,6 +354,45 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# A done: line is the delivery claim firstmate reads, so each mode's brief must
+# name the evidence it carries: a PR-based mode's done: needs the confirmed PR URL,
+# a no-mistakes worker hands off with ready: instead of an early done:, and a
+# local-only done: names its unpushed branch.
+test_ship_done_lines_name_mode_evidence() {
+  local home brief
+  home="$TMP_ROOT/done-evidence-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" done-nm some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/done-nm/brief.md"
+  assert_grep "Then append \`ready: {summary}\` to the status file and stop - not \`done:\`" "$brief" \
+    "no-mistakes brief does not hand off with ready: instead of done:"
+  assert_grep "States: working, needs-decision, blocked, paused, ready, done, failed." "$brief" \
+    "no-mistakes brief does not list the ready state"
+  assert_grep "confirm with \`gh-axi\` that the PR exists for your pushed branch, append \`done: PR {https:// url} checks green\`" "$brief" \
+    "no-mistakes brief does not require a confirmed PR URL in done:"
+  assert_grep "A \`done:\` without that PR URL is read as not delivered." "$brief" \
+    "no-mistakes brief does not warn that a URL-less done: is not delivery"
+  assert_no_grep "append \`done: {summary}\`" "$brief" \
+    "no-mistakes brief still asks for a pre-validation done:"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" done-dp some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/done-dp/brief.md"
+  assert_grep "Confirm with \`gh-axi\` that the PR exists for your pushed branch, then append \`done: PR {https:// url}\`" "$brief" \
+    "direct-PR brief does not require a confirmed PR URL in done:"
+  assert_grep "A \`done:\` without that PR URL is read as not delivered." "$brief" \
+    "direct-PR brief does not warn that a URL-less done: is not delivery"
+  assert_no_grep "ready: {summary}" "$brief" "direct-PR brief gained the no-mistakes ready: handoff"
+  assert_grep "States: working, needs-decision, blocked, paused, done, failed." "$brief" \
+    "direct-PR brief state list changed"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" done-lo some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/done-lo/brief.md"
+  assert_grep "append \`done: ready in branch fm/done-lo, not pushed\`" "$brief" \
+    "local-only done: does not name the ready, unpushed branch"
+  assert_no_grep "PR URL" "$brief" "local-only brief requires a PR URL"
+  pass "fm-brief.sh: each ship mode's done: line names its delivery evidence"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -634,7 +673,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief ready
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -655,7 +694,9 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    ready=''
+    [ "$kind" = ship ] && ready='ready, '
+    assert_grep "States: working, needs-decision, blocked, awaiting, ${ready}done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
@@ -871,6 +912,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_ship_done_lines_name_mode_evidence
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

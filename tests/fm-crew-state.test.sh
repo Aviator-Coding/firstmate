@@ -34,6 +34,8 @@
 #   (o) branch-sync (no step-level evidence) never supersedes a genuinely open
 #       needs-decision/blocked log
 #   (p) a missing run head never binds via branch_sync.local.head
+#   (q) no run + idle pane: a no-mistakes ready: handoff is parked, and a done:
+#       missing its mode's PR URL is blocked as a premature done, never done
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -508,6 +510,23 @@ test_gate_block_parked_not_superseded() {
   assert_contains "$out" "1 finding(s)" "gate block wait includes finding count"
   assert_not_contains "$out" "superseded" "gate block wait not flagged stale"
   pass "gate block parked run is not flagged superseded"
+}
+
+# A no-mistakes "checks green" done: without its PR URL is premature, so it must
+# not override the still-monitoring run into a delivered done.
+test_ci_ready_done_log_without_url_not_ready() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-no-url)
+  make_repo_on_branch "$d/wt" fm/feat-ci-nourl
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ci-nourl.meta" "window=fm:fm-feat-ci-nourl" "worktree=$d/wt" \
+    "kind=ship" "mode=no-mistakes"
+  printf 'done: PR checks green\n' > "$d/state/feat-ci-nourl.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci-nourl)"
+  local out; out=$(run_crew_state "$d" feat-ci-nourl)
+  assert_not_contains "$out" "source: status-log" "URL-less checks-green done: overrode the run-step"
+  assert_contains "$out" "source: run-step" "URL-less checks-green done: left the run-step authoritative"
+  pass "a URL-less checks-green done: does not beat a monitoring run"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
@@ -1064,6 +1083,35 @@ test_no_run_idle_pane_uses_keyed_log() {
   pass "no run + idle pane parses keyed status syntax"
 }
 
+# (q) The delivery mode decides whether a done: line is delivery. A no-mistakes or
+# direct-PR done: without its PR URL needs a steer, so it must never read as done.
+test_no_run_idle_pane_delivery_mode_done_lines() {
+  reset_fakes
+  local d n=0 mode line expect detail out
+  while IFS='|' read -r mode expect detail line; do
+    [ -n "$mode" ] || continue
+    n=$((n + 1))
+    d=$(new_case "mode-done-$n")
+    make_repo_on_branch "$d/wt" "fm/mode-$n"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/mode-$n.meta" "window=fm:fm-mode-$n" "worktree=$d/wt" \
+      "kind=ship" "harness=claude" "mode=$mode"
+    printf '%s\n' "$line" > "$d/state/mode-$n.status"
+    arm_idle_record "$d/state" "mode-$n"
+    out=$(run_crew_state "$d" "mode-$n")
+    assert_contains "$out" "state: $expect · source: status-log" "mode=$mode '$line'"
+    assert_contains "$out" "$detail" "mode=$mode '$line' detail"
+  done <<'ROWS'
+no-mistakes|blocked|premature done: mode=no-mistakes|done: implemented, 3 commits on fm/mode
+no-mistakes|done|pull/9 checks green|done: PR https://github.com/o/r/pull/9 checks green
+no-mistakes|parked|awaiting validation|ready: implemented and committed, awaiting validation
+direct-PR|blocked|premature done: mode=direct-PR|done: pushed fm/mode
+direct-PR|done|pull/9|done: PR https://github.com/o/r/pull/9
+local-only|done|not pushed|done: ready in branch fm/mode, not pushed
+ROWS
+  pass "no run + idle pane: ready: is parked and a URL-less PR-mode done: is a premature done"
+}
+
 # (g') no run + idle pane on a DECLARED external-wait pause -> state: paused, so a
 # supervisor reading the crew sees a distinct pause (and its reason) rather than a
 # wedge-suspect idle. This is the reader half the watcher/daemon build on.
@@ -1582,6 +1630,7 @@ test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_done_log_without_url_not_ready
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
@@ -1608,6 +1657,7 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_idle_working_status_log_is_not_current_working
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
+test_no_run_idle_pane_delivery_mode_done_lines
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
