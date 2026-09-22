@@ -685,7 +685,10 @@ signal_reason_is_actionable() {  # <file> ...
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 #
 # Companion side-channel output, set as a side effect of the ONE read above -
-# no extra cost. CREW_ABSORB_CLASS mirrors the printed token; CREW_ABSORB_RUN_ID
+# no extra cost. CREW_ABSORB_CLASS mirrors the printed token; CREW_ABSORB_STATE
+# is fm-crew-state.sh's raw state token (working, done, parked, ...; empty for
+# an unreadable verdict), for a caller that must tell a finished crew from a
+# parked or failed one; CREW_ABSORB_RUN_ID
 # is the active no-mistakes run id (fm-crew-state.sh's "run=<id>" detail token)
 # for a run-step-sourced working verdict, else empty. A caller that invokes this
 # function DIRECTLY (never through `$(...)`, which forks a subshell and
@@ -694,17 +697,20 @@ signal_reason_is_actionable() {  # <file> ...
 # log-freshness recheck later (active_run_log_fresh). Callers that only need
 # the printed token (the large majority) are unaffected either way.
 CREW_ABSORB_CLASS=""
+CREW_ABSORB_STATE=""
 CREW_ABSORB_RUN_ID=""
 
 crew_absorb_class() {  # <id>
   local id=$1 line state src
   CREW_ABSORB_CLASS=none
+  CREW_ABSORB_STATE=""
   CREW_ABSORB_RUN_ID=""
   if [ -n "$id" ]; then
     line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
     case "$line" in
       state:*)
         state=${line#state: }; state=${state%% *}
+        CREW_ABSORB_STATE=$state
         if [ "$state" = paused ]; then
           CREW_ABSORB_CLASS=paused
         elif [ "$state" = working ]; then

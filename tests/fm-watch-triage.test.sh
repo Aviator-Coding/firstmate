@@ -1109,6 +1109,159 @@ test_live_declared_pause_survives_pane_repaints() {
   pass "a live declared pause or captain hold keeps its bounded cadence across idle-pane repaints, still rechecks on the long cadence, and stays distinct from an exited agent"
 }
 
+# --- open PR with an armed merge poll: an external wait, not a wedge ----------
+# The 2026-09-22 case: a ship crew reported its PR ready and went idle, while
+# its no-mistakes run kept monitoring the PR for merge, so every idle stretch
+# read as a provably-working pane and wedge-escalated until the captain merged,
+# reaching demand-deep-inspection. Appending paused: did not help, because an
+# active run outranks a declared wait. The validated merge poll bin/fm-pr-check.sh
+# arms is the durable proof the crew is waiting on an external event, so the
+# stale pane takes the bounded declared-wait cadence instead - but only while
+# that poll stays armed and valid and the agent stays alive.
+
+# Build a ship crew whose PR poll is armed through the real bin/fm-pr-check.sh
+# (skipped when <arm> is 0) and whose idle pane is already one poll stale.
+pr_wait_case() {  # <name> <status-line> <arm:0|1> -> case dir
+  local name=$1 status=$2 arm=$3 dir state fakebin window key
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-prwait"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/prwait.meta"
+  printf '%s\n' "$status" > "$state/prwait.status"
+  printf '%s' "$(seen_sig "$state/prwait.status")" > "$state/.seen-prwait_status"
+  # The merge poll itself must never reach a real forge from a test.
+  printf '#!/usr/bin/env bash\nprintf "OPEN\\n"\n' > "$fakebin/gh"
+  chmod +x "$fakebin/gh"
+  if [ "$arm" = 1 ]; then
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-pr-check.sh" prwait https://github.com/example/repo/pull/7 >/dev/null 2>&1 \
+      || { printf 'arm-failed\n'; return 0; }
+  fi
+  touch "$state/.last-check"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'awaiting merge (idle 0)\n' > "$dir/pane.txt"
+  printf '%s' "$(hash_text 'awaiting merge (idle 0)')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' "$dir"
+}
+
+test_pr_merge_wait_is_bounded_not_a_wedge() {
+  local status dir state fakebin out capture_file window key round result
+  window="test:fm-prwait"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  # Both the PR-ready report itself and the paused: remedy tried on top of it.
+  for status in 'done: PR https://github.com/example/repo/pull/7 checks green' \
+      'paused: waiting for the captain to merge https://github.com/example/repo/pull/7'; do
+    dir=$(pr_wait_case "pr-wait-${status%%:*}" "$status" 1)
+    [ "$dir" != arm-failed ] || fail "fm-pr-check.sh could not arm the merge poll fixture"
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture_file="$dir/pane.txt"
+    [ -s "$state/prwait.pr-poll-registration" ] || fail "fixture did not arm a validated merge poll"
+
+    # A wedge threshold of one second: without the merge-wait branch every round
+    # below wedge-escalates within the round. Repaint the idle pane between rounds
+    # so the bounded cadence must also survive fresh hashes.
+    round=0
+    while [ "$round" -le 3 ]; do
+      printf 'awaiting merge (idle %s)\n' "$round" > "$capture_file"
+      result=$(paused_cadence_round "$state" "$fakebin" "$window" "$capture_file" "$out" grok \
+        'state: working · source: run-step · ci running · run=01PRWAIT' \
+        FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999)
+      [ "$result" = alive ] \
+        || fail "[$status] round $round escalated an idle crew waiting on its armed PR merge poll: $(cat "$out")"
+      round=$((round + 1))
+    done
+    [ "$(stale_wake_count "$state" "$window")" -eq 0 ] \
+      || fail "[$status] an armed PR merge wait queued a stale wake inside its recheck window"
+    grep -F "possible wedge" "$out" >/dev/null && fail "[$status] an armed PR merge wait was labeled a possible wedge"
+    [ -e "$state/.paused-$key" ] || fail "[$status] an armed PR merge wait did not take the bounded cadence"
+    [ ! -e "$state/.stale-since-$key" ] || fail "[$status] an armed PR merge wait kept a wedge timer"
+
+    # Past the long window it re-surfaces once as a bounded recheck, never a wedge.
+    set_mtime $(( $(date +%s) - 500 )) "$state/prwait.status"
+    printf '%s' "$(seen_sig "$state/prwait.status")" > "$state/.seen-prwait_status"
+    rm -f "$state/.paused-resurfaced-$key"
+    : > "$out"
+    result=$(paused_cadence_round "$state" "$fakebin" "$window" "$capture_file" "$out" grok \
+      'state: working · source: run-step · ci running · run=01PRWAIT' \
+      FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=240)
+    [ "$result" = exit ] || fail "[$status] an armed PR merge wait never re-surfaced for its bounded recheck"
+    grep -F "awaiting external" "$out" >/dev/null || fail "[$status] the PR merge recheck lost its external-wait reason: $(cat "$out")"
+    grep -F "possible wedge" "$out" >/dev/null && fail "[$status] the PR merge recheck was labeled a possible wedge"
+    [ "$(stale_wake_count "$state" "$window")" -eq 1 ] \
+      || fail "[$status] the PR merge recheck queued more than one stale wake"
+  done
+  pass "an idle crew whose PR has an armed merge poll is rechecked on the bounded cadence, never wedge-escalated"
+}
+
+test_pr_merge_wait_without_armed_poll_still_escalates() {
+  local dir state fakebin out window result
+  window="test:fm-prwait"
+  # A bare pr= line is not an armed poll: key on the validated registration.
+  dir=$(pr_wait_case pr-wait-unarmed 'done: PR https://github.com/example/repo/pull/7 checks green' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'pr=https://github.com/example/repo/pull/7\n' >> "$state/prwait.meta"
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$dir/pane.txt" "$out" grok \
+    'state: working · source: run-step · ci running · run=01PRWAIT' FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999)
+  [ "$result" = exit ] || fail "an idle provably-working crew with no armed merge poll was never wedge-escalated"
+  grep -F "possible wedge" "$out" >/dev/null || fail "an unarmed crew's escalation was not a possible wedge: $(cat "$out")"
+  pass "an idle provably-working crew without an armed merge poll still wedge-escalates as before"
+}
+
+test_pr_merge_wait_dead_endpoint_still_reported() {
+  local dir state fakebin out window result
+  window="test:fm-prwait"
+  # Run still monitoring, agent gone: the wedge timer still owns it.
+  dir=$(pr_wait_case pr-wait-dead-working 'done: PR https://github.com/example/repo/pull/7 checks green' 1)
+  [ "$dir" != arm-failed ] || fail "fm-pr-check.sh could not arm the merge poll fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$dir/pane.txt" "$out" zsh \
+    'state: working · source: run-step · ci running · run=01PRWAIT' FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999)
+  [ "$result" = exit ] || fail "an armed PR merge wait hid a dead agent behind the bounded cadence"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a dead agent under a monitoring run was not wedge-escalated: $(cat "$out")"
+
+  # Checks green, agent gone: surfaced at once as a stopped crew.
+  dir=$(pr_wait_case pr-wait-dead-done 'done: PR https://github.com/example/repo/pull/7 checks green' 1)
+  [ "$dir" != arm-failed ] || fail "fm-pr-check.sh could not arm the merge poll fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$dir/pane.txt" "$out" zsh \
+    'state: done · source: run-step · checks green: PR ready for review' FM_PAUSE_RESURFACE_SECS=999)
+  [ "$result" = exit ] || fail "an armed PR merge wait hid a dead agent whose checks were green"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "a dead agent with green checks was not surfaced as stale: $(cat "$out")"
+  pass "an armed PR merge wait never hides a dead agent"
+}
+
+test_pr_merge_wait_resurfaces_when_it_stops_holding() {
+  local dir state fakebin out window key result
+  window="test:fm-prwait"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Disarmed poll (the shape a retired merged poll leaves behind): the wedge
+  # timer takes over again within one threshold.
+  dir=$(pr_wait_case pr-wait-disarmed 'done: PR https://github.com/example/repo/pull/7 checks green' 1)
+  [ "$dir" != arm-failed ] || fail "fm-pr-check.sh could not arm the merge poll fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$dir/pane.txt" "$out" grok \
+    'state: working · source: run-step · ci running · run=01PRWAIT' FM_PAUSE_RESURFACE_SECS=999)
+  [ "$result" = alive ] || fail "an armed PR merge wait was not absorbed before its poll was disarmed: $(cat "$out")"
+  [ -e "$state/.paused-$key" ] || fail "an armed PR merge wait did not take the bounded cadence"
+  rm -f "$state/prwait.check.sh" "$state/prwait.pr-poll" "$state/prwait.pr-poll-registration"
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$dir/pane.txt" "$out" grok \
+    'state: working · source: run-step · ci running · run=01PRWAIT' FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999)
+  [ "$result" = exit ] || fail "a disarmed merge poll left the crew on the bounded cadence"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a disarmed merge poll did not return to wedge escalation: $(cat "$out")"
+
+  # PR gone red and the run parked at a fix gate: surfaced at the next recheck.
+  dir=$(pr_wait_case pr-wait-red 'done: PR https://github.com/example/repo/pull/7 checks green' 1)
+  [ "$dir" != arm-failed ] || fail "fm-pr-check.sh could not arm the merge poll fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$dir/pane.txt" "$out" grok \
+    'state: done · source: run-step · checks green: PR ready for review' FM_PAUSE_RESURFACE_SECS=999)
+  [ "$result" = alive ] || fail "a green armed PR merge wait was not absorbed: $(cat "$out")"
+  set_mtime $(( $(date +%s) - 500 )) "$state/.paused-rechecked-$key"
+  result=$(paused_cadence_round "$state" "$fakebin" "$window" "$dir/pane.txt" "$out" grok \
+    'state: parked · source: run-step · parked at fix_review: 1 finding(s)' FM_PAUSE_RESURFACE_SECS=999)
+  [ "$result" = exit ] || fail "a PR merge wait whose run parked on a red PR stayed on the bounded cadence"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "a red PR's parked gate was not surfaced as stale: $(cat "$out")"
+  pass "a PR merge wait re-surfaces as soon as its poll is disarmed or its run stops only waiting on the merge"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2152,6 +2305,10 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_live_declared_pause_survives_pane_repaints
+test_pr_merge_wait_is_bounded_not_a_wedge
+test_pr_merge_wait_without_armed_poll_still_escalates
+test_pr_merge_wait_dead_endpoint_still_reported
+test_pr_merge_wait_resurfaces_when_it_stops_holding
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
