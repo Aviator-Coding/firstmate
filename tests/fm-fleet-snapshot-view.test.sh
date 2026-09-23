@@ -1220,7 +1220,9 @@ EOF
     "kind=ship" \
     "mode=no-mistakes"
   record_claude_idle "$home/state" terminal-ship
-  printf 'done: complete\n' > "$home/state/terminal-ship.status"
+  # A no-mistakes ship's done: is delivery only with its PR URL; a URL-less one
+  # is a premature done (fm-classify-lib.sh's status_done_is_premature).
+  printf 'done: PR https://github.com/sample/repo/pull/1 checks green\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$out" | jq -e '
     .valid == false
