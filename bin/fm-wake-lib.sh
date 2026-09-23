@@ -2387,9 +2387,13 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 
 # Print supplemental drain-time context only after the caller has committed the
 # raw queue consumption and released the append lock.
+# When the caller also sourced fm-classify-lib.sh, an event that its
+# status_done_is_premature flags for the task's recorded delivery mode is tagged
+# ahead of the event text, so firstmate reads a steer rather than a delivery.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
   local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
+  local meta task_mode tag
   local LC_ALL=C
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
@@ -2452,6 +2456,11 @@ EOF
       continue
     fi
     last_event=$FM_WAKE_EVENT_LINE
+    task_mode=
+    meta="$STATE/${status_key%.status}.meta"
+    if declare -F status_done_is_premature >/dev/null && [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      task_mode=$(grep '^mode=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-) || task_mode=''
+    fi
     while IFS= read -r event_line || [ -n "$event_line" ]; do
       [ -n "$event_line" ] || continue
       event_line=$(printf '%s' "$event_line" | LC_ALL=C tr '\t\r' '  ')
@@ -2462,7 +2471,11 @@ EOF
       if [ "$mode" = historical ]; then
         prefix="$prefix; historical / not necessarily the triggering event"
       fi
-      line="$prefix: $status_key: $event_line"
+      tag=''
+      if [ -n "$task_mode" ] && status_done_is_premature "$event_line" "$task_mode"; then
+        tag="[premature done: mode=$task_mode requires the PR URL in done:, steer the worker to finish delivery] "
+      fi
+      line="$prefix: $status_key: $tag$event_line"
       printf '%s\n' "$line" || return 1
     done <<EOF
 $FM_WAKE_UNREAD_LINES

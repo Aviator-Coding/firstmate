@@ -1692,6 +1692,51 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# pr_merge_wait_armed: 0 iff <task> has an armed, validated, non-terminal PR
+# merge poll - the sidecar, byte-static check, and transactional registration
+# bin/fm-pr-check.sh publishes all still bind to the one canonical pr= identity
+# in the task's metadata (fm_pr_poll_artifacts_valid), and no merged result is
+# mid-retirement. A bare pr= line never qualifies, so a disarmed, doctored, or
+# half-written poll drops back to ordinary stale handling. Filesystem-only; on
+# success FM_PR_REG_DATA_IDENTITY and FM_PR_REG_CHECK_IDENTITY name the live
+# registration.
+pr_merge_wait_armed() {  # <task>
+  local task=$1
+  [ -n "$task" ] && fm_pr_task_id_valid "$task" || return 1
+  [ ! -e "$STATE/$task.pr-poll-retirement" ] && [ ! -L "$STATE/$task.pr-poll-retirement" ] || return 1
+  fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh"
+}
+
+# The same new-hash bound as captain_call_stale_bound, for a delivered ship crew
+# whose only wait is its open PR's merge: an armed, validated merge poll is the
+# durable proof, and the PR-ready line it follows already reached firstmate. An
+# idle pane that merely repaints has nothing new to say until the poll reports.
+# Reads the crew_absorb_class side channel, so the caller must have just run
+# crew_absorb_class directly (never in a subshell). The bound holds only while
+# the crew reads done (a provably-working crew already took the working
+# override above it) with no later open decision, blocker, or failure, and its
+# agent is confidently alive, so a parked or failed run, a disarmed or invalid
+# poll, and a dead or unreadable endpoint alarm exactly as before. The
+# throttle is scoped to the live poll registration plus the status-log state,
+# so a re-armed poll or any new status event starts its own window whose first
+# new hash alarms.
+# Sets STALE_WAIT_DECLARATION when the wait holds (EMPTY otherwise) and returns
+# 0 to absorb this sighting, 1 to alarm; the caller records the throttle
+# through stale_wait_record once its own wake append has succeeded.
+pr_merge_wait_stale_bound() {  # <window> <window-key> <task>
+  local win=$1 key=$2 task=$3
+  STALE_WAIT_DECLARATION=
+  [ "$(window_kind "$win")" != secondmate ] || return 1
+  [ "$CREW_ABSORB_STATE" = done ] || return 1
+  case "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" in
+    needs-decision|blocked|failed) return 1 ;;
+  esac
+  pr_merge_wait_armed "$task" || return 1
+  [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null)" = alive ] || return 1
+  STALE_WAIT_DECLARATION="pr-merge-wait:$FM_PR_REG_DATA_IDENTITY:$FM_PR_REG_CHECK_IDENTITY:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -2797,6 +2842,15 @@ EOF
               rm -f "$ssf" "$arf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && pr_merge_wait_stale_bound "$w" "$key" "$task"; then
+              # Same new-hash bound for a delivered PR still waiting on its
+              # merge, when no captain call already bounds it: the first sight
+              # alarmed, a new hash inside the window is absorbed, and a new
+              # hash after it alarms again.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf" "$arf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (open PR merge wait already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

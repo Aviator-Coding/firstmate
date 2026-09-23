@@ -447,6 +447,46 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+# ready: is the no-mistakes validation handoff and must wake firstmate like a
+# terminal verb, while a done: that skips its mode's PR URL is premature.
+test_ready_and_premature_done_classifier() {
+  local line mode expect
+  status_is_captain_relevant "ready: implemented and committed on fm/x" \
+    || fail "ready: handoff not captain-relevant"
+  status_is_terminal_verb "ready [key=impl]: committed" || fail "keyed ready: not a terminal verb"
+  status_is_captain_relevant "working: almost ready: tests pass" \
+    && fail "working: prose naming ready: wrongly captain-relevant"
+  [ -z "$(printf 'working [key=impl]: coding\nready [key=impl]: committed\n' | status_open_activities -)" ] \
+    || fail "ready: did not close the working phase it ends"
+  printf 'working: coding\nready [at=1783792800]: committed on fm/x\n' > "$TMP_ROOT/ready-latest.status"
+  [ "$(last_status_line "$TMP_ROOT/ready-latest.status")" = "ready [at=1783792800]: committed on fm/x" ] \
+    || fail "a stamped ready: handoff was not read as the latest status event"
+  printf 'needs-decision [key=q]: pick one\nready: committed\n' > "$TMP_ROOT/ready-open.status"
+  status_open_decisions "$TMP_ROOT/ready-open.status" ship | grep -F $'q\t' >/dev/null \
+    || fail "a ready: handoff closed an open decision"
+  while IFS='|' read -r mode expect line; do
+    [ -n "$mode" ] || continue
+    if status_done_is_premature "$line" "$mode"; then
+      [ "$expect" = premature ] || fail "mode=$mode '$line' wrongly flagged premature"
+    else
+      [ "$expect" = accepted ] || fail "mode=$mode '$line' not flagged premature"
+    fi
+  done <<'ROWS'
+no-mistakes|premature|done: implemented, 3 commits on fm/x
+no-mistakes|premature|done [key=impl]: PR checks green
+no-mistakes|premature|done [at=1783792800]: PR checks green
+no-mistakes|accepted|done: PR https://github.com/o/r/pull/9 checks green
+no-mistakes|accepted|done [at=1783792800]: PR https://github.com/o/r/pull/9 checks green
+direct-PR|premature|done: pushed fm/x
+direct-PR|accepted|done: PR https://github.com/o/r/pull/9
+local-only|accepted|done: ready in branch fm/x, not pushed
+none|accepted|done: report written
+no-mistakes|accepted|ready: implemented and committed on fm/x
+no-mistakes|accepted|working: done soon
+ROWS
+  pass "ready: wakes firstmate, closes its phase but no decision, and a URL-less no-mistakes/direct-PR done: is premature"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -2085,7 +2125,7 @@ test_terminal_stale_surfaced() {
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
 # (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
-# pre-validation "done:" line as the LAST line for the run's entire (possibly
+# pre-validation "ready:" handoff as the LAST line for the run's entire (possibly
 # many-minutes) duration. stale_is_terminal alone has no run-step awareness and
 # would treat that leftover as still-current every time the pane goes quiet,
 # immediately surfacing a crew that is actively validating. crew_is_provably_working
@@ -2098,10 +2138,10 @@ test_stale_terminal_status_overridden_by_active_run() {
   window="test:fm-validating"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
-  # The crew reported done BEFORE firstmate triggered no-mistakes validation;
-  # this line never gets superseded by a newer status-log entry while the
-  # pipeline itself runs.
-  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  # The crew reported its ready: handoff BEFORE firstmate triggered no-mistakes
+  # validation; this line never gets superseded by a newer status-log entry while
+  # the pipeline itself runs.
+  printf 'ready: implemented and committed, awaiting validation\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "no-mistakes axi run: validating...")
@@ -2110,7 +2150,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   # Phase A: a high escalation threshold means the first sighting is absorbed,
-  # not surfaced, despite the captain-relevant "done:" status-log line.
+  # not surfaced, despite the captain-relevant "ready:" status-log line.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -3958,6 +3998,155 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
   [ "$wakes" -eq 1 ] \
     || fail "the second captain call produced $wakes first wakes instead of one"
   pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
+}
+
+# --- open PR with an armed merge poll: the same new-hash bound ----------------
+# A delivered ship crew whose PR has an armed, validated merge poll
+# (bin/fm-pr-check.sh) is only waiting on that merge. Its PR-ready line already
+# reached firstmate, so an idle pane that merely repaints has nothing new to say:
+# without a bound, every repaint of an unheld delivery re-alarmed a bare stale
+# (the fork's 2026-09-22 flood). The poll, not a bare pr= line, is the proof.
+
+prwait_key() {
+  printf '%s' test:fm-prwait | tr ':/.' '___'
+}
+
+# A delivered ship crew with its PR merge poll armed through the real
+# bin/fm-pr-check.sh (skipped when <arm> is 0, which records only a bare pr=).
+make_prwait_home() {  # <name> <arm:0|1>
+  local name=$1 arm=$2 dir state
+  dir=$(make_case "$name"); state="$dir/state"
+  printf 'window=test:fm-prwait\nkind=ship\nmode=no-mistakes\nharness=grok\nbackend=tmux\n' \
+    > "$state/prwait.meta"
+  printf 'done: PR https://github.com/example/repo/pull/7 checks green\n' > "$state/prwait.status"
+  printf '%s' "$(seen_sig "$state/prwait.status")" > "$state/.seen-prwait_status"
+  # The merge poll must never reach a real forge from a test.
+  printf '#!/usr/bin/env bash\nprintf "OPEN\\n"\n' > "$dir/fakebin/gh"
+  chmod +x "$dir/fakebin/gh"
+  if [ "$arm" = 1 ]; then
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 PATH="$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-pr-check.sh" prwait https://github.com/example/repo/pull/7 >/dev/null 2>&1 \
+      || return 1
+    [ -s "$state/prwait.pr-poll-registration" ] || return 1
+  else
+    printf 'pr=https://github.com/example/repo/pull/7\n' >> "$state/prwait.meta"
+  fi
+  touch "$state/.last-check"
+  printf '%s\n' "$dir"
+}
+
+# One watcher against a PR-wait fixture, armed like hold_watch_launch. The crew
+# state and the pane's foreground command (grok alive, zsh an exited agent) are
+# the two inputs the bound reads beyond the poll itself.
+PRWAIT_WATCH_PID=
+prwait_watch_launch() {  # <dir> <out> <capture> <crew-state> <pane-command>
+  local dir=$1 out=$2 capture=$3 crew=$4 cmd=$5
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-prwait \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND="$cmd" \
+    FM_FAKE_CREW_STATE="$crew" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
+  PRWAIT_WATCH_PID=$!
+}
+
+prwait_watch_surface() {  # <dir> <out> <capture> <pane-text> <crew-state> <pane-command>
+  printf '%s\n' "$4" > "$3"
+  prwait_watch_launch "$1" "$2" "$3" "$5" "$6"
+  wait_for_exit "$PRWAIT_WATCH_PID" 100 || { reap "$PRWAIT_WATCH_PID"; return 1; }
+  return 0
+}
+
+# <count> successive pane changes through ONE watcher, three poll cycles each, as
+# hold_watch_churn does; the watcher must stay in the loop throughout.
+prwait_watch_churn() {  # <dir> <out> <capture> <count> <crew-state> <pane-command>
+  local dir=$1 out=$2 capture=$3 count=$4 i=1 c
+  printf 'awaiting merge 0\n' > "$capture"
+  prwait_watch_launch "$dir" "$out" "$capture" "$5" "$6"
+  while [ "$i" -le "$count" ]; do
+    printf 'awaiting merge %s\n' "$i" > "$capture"
+    c=0
+    while [ "$c" -lt 3 ]; do
+      wait_poll_cycle "$dir/state" "$PRWAIT_WATCH_PID" 300 \
+        || { reap "$PRWAIT_WATCH_PID"; return 1; }
+      c=$((c + 1))
+    done
+    i=$((i + 1))
+  done
+  reap "$PRWAIT_WATCH_PID"
+  return 0
+}
+
+prwait_stale_wakes() {  # <state>
+  awk -F '\t' '$3 == "stale" && $4 == "test:fm-prwait" { n++ } END { print n + 0 }' \
+    "$1/.wake-queue" 2>/dev/null || echo 0
+}
+
+# A delivered no-mistakes crew whose checks are green reads done while its PR
+# waits on the merge; that is the reading this bound serves.
+test_armed_pr_merge_wait_bounds_stale_churn() {
+  local crew dir state out capture throttle wakes
+  crew='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  dir=$(make_prwait_home prwait-armed 1) \
+    || fail "fm-pr-check.sh could not arm the merge poll fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(prwait_key)"
+
+  # First sight still alarms: the bound limits repetition, never the first look.
+  prwait_watch_surface "$dir" "$out" "$capture" 'awaiting merge, idle 1s' "$crew" grok \
+    || fail "first sight of the delivered PR did not surface"
+  wakes=$(prwait_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "first sight produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+
+  # The idle pane repaints while the same armed poll stands.
+  prwait_watch_churn "$dir" "$out" "$capture" 2 "$crew" grok \
+    || fail "watcher exited during pane churn instead of supervising through it"
+  wakes=$(prwait_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn re-alarmed the armed PR merge wait $wakes time(s) inside its window"
+
+  # After the window, the next new hash re-surfaces the wait exactly once, so a
+  # PR forgotten behind a churning pane cannot hide behind the bound.
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  prwait_watch_surface "$dir" "$out" "$capture" 'awaiting merge, idle 9s' "$crew" grok \
+    || fail "the PR merge wait did not re-surface once its window elapsed"
+  wakes=$(prwait_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "the elapsed window produced $wakes wakes instead of one"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "an armed PR merge wait was labeled a possible wedge"
+  pass "a delivered PR with an armed merge poll surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+}
+
+# The bound's other half: the same delivered crew keeps alarming on every new
+# hash when its wait is not provably only the merge - a bare pr= line with no
+# armed poll, an exited agent, or a run parked at a gate.
+test_pr_merge_wait_bound_needs_an_armed_live_wait() {
+  local spec name arm crew cmd dir state out capture round wakes
+  for spec in \
+    'unarmed|0|state: done · source: run-step · checks green: PR ready for review|grok' \
+    'dead-agent|1|state: done · source: run-step · checks green: PR ready for review|zsh' \
+    'parked-run|1|state: parked · source: run-step · parked at fix_review: 1 finding(s)|grok'
+  do
+    IFS='|' read -r name arm crew cmd <<EOF
+$spec
+EOF
+    dir=$(make_prwait_home "prwait-$name" "$arm") \
+  \
+    || fail "[$name] could not build the PR-wait fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    round=1
+    while [ "$round" -le 2 ]; do
+      prwait_watch_surface "$dir" "$out" "$capture" "awaiting merge, idle ${round}s" "$crew" "$cmd" \
+    \
+    || fail "[$name] a stale delivery stopped alarming on round $round"
+      wakes=$(prwait_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] || fail "[$name] round $round produced $wakes wakes instead of one"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+  done
+  pass "a delivered PR without an armed poll, with an exited agent, or with a parked run keeps alarming on every new hash"
 }
 
 
@@ -6125,6 +6314,7 @@ test_status_span_respects_decision_closure
 test_malformed_seen_signature_reads_the_whole_log
 test_stale_is_terminal_classifier
 test_classifier_primitives
+test_ready_and_premature_done_classifier
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
@@ -6214,6 +6404,8 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_armed_pr_merge_wait_bounds_stale_churn
+test_pr_merge_wait_bound_needs_an_armed_live_wait
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
