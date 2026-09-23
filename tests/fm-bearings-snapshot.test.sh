@@ -2951,6 +2951,9 @@ EOF
     "window=fixture:captured-status" "worktree=$worktree" "project=firstmate" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "spawn_gen=stable-generation"
   printf 'working: captured state\n' > "$home/state/captured-status.status"
+  # An idle pane with a trailing working: line reads as unknown (fm-crew-state.sh
+  # never promotes that phase note to current working), still sourced from the
+  # captured status line rather than the decision appended after capture.
   record_claude_state "$home/state" captured-status idle
   cat > "$fakebin/cp" <<'SH'
 #!/usr/bin/env bash
@@ -2971,8 +2974,9 @@ SH
     || fail "fleet snapshot failed during captured status race"
   printf '%s' "$json" | jq -e '
     .tasks[] | select(.id == "captured-status")
-    | .current_state.state == "working"
+    | .current_state.state == "unknown"
       and .current_state.source == "status-log"
+      and (.current_state.detail | startswith("working: captured state"))
       and .paths.status_log.last_event.raw == "working: captured state"
       and .hints.pending_decision == false
       and .hints.open_decisions == []
