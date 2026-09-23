@@ -1727,7 +1727,7 @@ pr_merge_wait_stale_bound() {  # <window> <window-key> <task>
   local win=$1 key=$2 task=$3
   STALE_WAIT_DECLARATION=
   [ "$(window_kind "$win")" != secondmate ] || return 1
-  [ "$CREW_ABSORB_STATE" = done ] || return 1
+  [ "$CREW_ABSORB_STATE" = "done" ] || return 1
   case "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" in
     needs-decision|blocked|failed) return 1 ;;
   esac
