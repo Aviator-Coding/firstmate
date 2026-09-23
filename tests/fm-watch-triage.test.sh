@@ -508,8 +508,14 @@ test_premature_done_keeps_decision_open_classifier() {
   [ -z "$(status_open_decisions "$f")" ] \
     || fail "a PR-URL no-mistakes done: left a decision open"
 
+  f="$TMP_ROOT/premature-pr.status"
+  printf 'window=test:premature\nkind=ship\nmode=direct-PR\n' > "${f%.status}.meta"
+  printf 'needs-decision [key=q]: pick a route\ndone: pushed the branch, no PR yet\n' > "$f"
+  status_open_decisions "$f" | grep -F $'q\t' >/dev/null \
+    || fail "a URL-less direct-PR done: closed an open decision"
+
   f="$TMP_ROOT/local-only.status"
-  printf 'window=test:premature\nkind=ship\n' > "${f%.status}.meta"
+  printf 'window=test:premature\nkind=ship\nmode=local-only\n' > "${f%.status}.meta"
   printf 'needs-decision [key=q]: pick a route\ndone: implemented locally\n' > "$f"
   [ -z "$(status_open_decisions "$f")" ] \
     || fail "a local-only ship's done: left a decision open"

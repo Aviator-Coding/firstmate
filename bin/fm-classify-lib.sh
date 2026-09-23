@@ -701,10 +701,13 @@ _fm_status_kind() {
   case "$kind" in ship|scout|secondmate) printf '%s' "$kind" ;; *) printf unknown ;; esac
 }
 
-# The task's delivery mode (no-mistakes, direct-PR, secondmate, or empty for a
-# local-only ship), read from the sibling .meta the same way _fm_status_kind
-# reads kind. Needed only to tell a delivered done: from a premature one
-# (status_done_is_premature); every other fold decision ignores it.
+# The task's delivery mode as recorded in the sibling .meta (no-mistakes,
+# direct-PR, local-only for a ship, or secondmate), read the same way
+# _fm_status_kind reads kind. Empty only when the record states none - a
+# scout's deliverable is a report rather than a merge, so fm-spawn.sh never
+# writes it one, and a legacy record may predate mode= entirely. Needed only
+# to tell a delivered done: from a premature one (status_done_is_premature);
+# every other fold decision ignores it.
 _fm_status_mode() {
   local meta=${1%.status}.meta mode='' line
   [ -f "$meta" ] && [ -r "$meta" ] && [ ! -L "$meta" ] || { printf '%s' ''; return 0; }
