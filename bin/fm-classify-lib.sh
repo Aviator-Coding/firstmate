@@ -444,6 +444,9 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # captain-held backlog transfer referencing that key CLOSES it.
 # Ship/scout terminal declarations supersede stale log decisions; a secondmate's
 # terminal event may describe other work and cannot close an unrelated decision.
+# The one exception: a no-mistakes or direct-PR ship's done: that skipped its
+# mode's PR URL (status_done_is_premature) is not delivery, so it does not
+# supersede - an open decision stays open for it exactly as it does for ready:.
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
 # at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
 # worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
@@ -698,8 +701,21 @@ _fm_status_kind() {
   case "$kind" in ship|scout|secondmate) printf '%s' "$kind" ;; *) printf unknown ;; esac
 }
 
-_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind>
-  local open=$1 line=$2 resolve=$3 held=$4 kind=$5 verb key note unstamped
+# The task's delivery mode (no-mistakes, direct-PR, secondmate, or empty for a
+# local-only ship), read from the sibling .meta the same way _fm_status_kind
+# reads kind. Needed only to tell a delivered done: from a premature one
+# (status_done_is_premature); every other fold decision ignores it.
+_fm_status_mode() {
+  local meta=${1%.status}.meta mode='' line
+  [ -f "$meta" ] && [ -r "$meta" ] && [ ! -L "$meta" ] || { printf '%s' ''; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in mode=*) mode=${line#mode=} ;; esac
+  done < "$meta"
+  printf '%s' "$mode"
+}
+
+_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind> <mode>
+  local open=$1 line=$2 resolve=$3 held=$4 kind=$5 mode=$6 verb key note unstamped
   # Both colon tests below ask where the head ends, the same question the note
   # and key readers ask, so they read the same unstamped copy those readers do.
   # A worker-written time tag must never decide whether a decision opens or
@@ -721,7 +737,15 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   esac
   status_line_verb "$line" verb
   case "$unstamped" in
-    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac ;;
+    *:*)
+      case "$verb:$kind" in
+        # A premature done: (status_done_is_premature) is not delivery - the
+        # worker still owes its mode's PR URL, so a decision the captain has
+        # not answered must not be silently closed underneath them.
+        done:ship) status_done_is_premature "$line" "$mode" || return 0 ;;
+        done:scout|failed:ship|failed:scout) return 0 ;;
+      esac
+      ;;
   esac
   case "$verb" in
     needs-decision|blocked|"$resolve"|"$held") ;;
@@ -760,16 +784,17 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' verb
+  local f=$1 kind=${2:-} mode line resolve held open='' verb
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f" "$kind")
+  mode=$(_fm_status_mode "$f")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" verb
     case "$verb" in
       needs-decision|blocked|done|failed|"$resolve"|"$held")
-        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$mode")
         ;;
     esac
   done < "$f"
@@ -870,10 +895,11 @@ EOF
 # whose leading word is followed by neither whitespace, a colon, nor a bracket
 # tag cannot be a transition, because the fold's own declaration guard rejects it.
 status_key_closing_verb() {  # <status-file> <key>
-  local f=$1 want=$2 line resolve held open='' was verb='' kind event candidates
+  local f=$1 want=$2 line resolve held open='' was verb='' kind mode event candidates
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   [ -n "$want" ] || return 0
   kind=$(_fm_status_kind "$f")
+  mode=$(_fm_status_mode "$f")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   candidates=$(grep -E \
@@ -895,7 +921,7 @@ status_key_closing_verb() {  # <status-file> <key>
     esac
     was=0
     _fm_open_set_has "$open" "$want" && was=1
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$mode")
     if [ "$was" = 1 ] && ! _fm_open_set_has "$open" "$want"; then
       verb=$event
     fi
@@ -1014,10 +1040,14 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # malformed worker stamp whose colons used to pose as the head/note separator
 # no longer opens or closes anything; cursors folded under that reading are
 # discarded.
+# 10: a premature done: (no PR URL yet, per status_done_is_premature) on a
+# no-mistakes or direct-PR ship no longer closes open decisions the way a
+# delivered done: does, so a cursor folded under the old always-closes reading
+# is discarded.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=9
+FM_OPEN_DECISIONS_FOLD_VERSION=10
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
@@ -1092,9 +1122,10 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor kind fold_version
+  local target_cursor kind mode fold_version
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f")
+  mode=$(_fm_status_mode "$f")
   fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
@@ -1185,7 +1216,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$mode")
     done < "$chunk_file"
     rm -f "$chunk_file"
     offset=$size
@@ -1974,13 +2005,14 @@ EOF
 
 _fm_status_open_decision_origins() {  # <status-file> [<kind>]
   local f=$1 line open='' after key verb note number=0 origins=''
-  local resolve held kind
+  local resolve held kind mode
   kind=$(_fm_status_kind "$f" "${2:-}")
+  mode=$(_fm_status_mode "$f")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     number=$((number + 1))
-    after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+    after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$mode")
     [ -n "$after" ] || origins=''
     key=$(_fm_decision_key "$line") || { open=$after; continue; }
     verb=$(status_line_verb "$line")
@@ -2167,7 +2199,7 @@ crew_absorb_class() {  # <id>
     case "$line" in
       state:*)
         state=${line#state: }; state=${state%% *}
-        # shellcheck disable=SC2034 # Read by fm-watch.sh's pr_merge_wait_holds, not this lib.
+        # shellcheck disable=SC2034 # Read by fm-watch.sh's pr_merge_wait_stale_bound, not this lib.
         CREW_ABSORB_STATE=$state
         if [ "$state" = paused ]; then
           CREW_ABSORB_CLASS=paused

@@ -487,6 +487,42 @@ ROWS
   pass "ready: wakes firstmate, closes its phase but no decision, and a URL-less no-mistakes/direct-PR done: is premature"
 }
 
+# The ship/scout close-on-done rule above (_fm_decision_fold_line) must not
+# close a decision the captain never answered just because a no-mistakes or
+# direct-PR ship's done: skipped its mode's PR URL: status_done_is_premature
+# already flags that done: as not actually delivered, so the fold must leave
+# any still-open decision open for it, the same way it does for ready:. A
+# delivered (PR-URL) done:, a local-only ship's done:, and a scout's done:
+# still close an open decision exactly as before.
+test_premature_done_keeps_decision_open_classifier() {
+  local f
+  f="$TMP_ROOT/premature-nm.status"
+  printf 'window=test:premature\nkind=ship\nmode=no-mistakes\n' > "${f%.status}.meta"
+  printf 'needs-decision [key=q]: pick a route\ndone: implemented, no PR yet\n' > "$f"
+  status_open_decisions "$f" | grep -F $'q\t' >/dev/null \
+    || fail "a URL-less no-mistakes done: closed an open decision"
+
+  f="$TMP_ROOT/delivered-nm.status"
+  printf 'window=test:premature\nkind=ship\nmode=no-mistakes\n' > "${f%.status}.meta"
+  printf 'needs-decision [key=q]: pick a route\ndone: PR https://github.com/o/r/pull/1 checks green\n' > "$f"
+  [ -z "$(status_open_decisions "$f")" ] \
+    || fail "a PR-URL no-mistakes done: left a decision open"
+
+  f="$TMP_ROOT/local-only.status"
+  printf 'window=test:premature\nkind=ship\n' > "${f%.status}.meta"
+  printf 'needs-decision [key=q]: pick a route\ndone: implemented locally\n' > "$f"
+  [ -z "$(status_open_decisions "$f")" ] \
+    || fail "a local-only ship's done: left a decision open"
+
+  f="$TMP_ROOT/scout.status"
+  printf 'window=test:premature\nkind=scout\nmode=no-mistakes\n' > "${f%.status}.meta"
+  printf 'needs-decision [key=q]: pick a route\ndone: scouted the option\n' > "$f"
+  [ -z "$(status_open_decisions "$f")" ] \
+    || fail "a scout's done: left a decision open"
+
+  pass "a premature no-mistakes/direct-PR done: leaves an open decision open; a delivered done:, a local-only ship's done:, and a scout's done: still close it"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -6315,6 +6351,7 @@ test_malformed_seen_signature_reads_the_whole_log
 test_stale_is_terminal_classifier
 test_classifier_primitives
 test_ready_and_premature_done_classifier
+test_premature_done_keeps_decision_open_classifier
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
