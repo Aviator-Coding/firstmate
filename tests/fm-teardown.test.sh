@@ -2797,6 +2797,10 @@ assert_teardown_refused_before_worktree_return() {  # <case-dir> <label>
     "$label: refusal dropped the worktree pointer"
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "$label: refusal still returned the isolated copy: $(cat "$case_dir/treehouse.log")"
+  # The refusable close runs before the backlog close-marker is written, so
+  # bootstrap has no marker to replay against the retained record.
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "$label: refusal left a backlog close-marker that bootstrap would replay against the retained record"
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
