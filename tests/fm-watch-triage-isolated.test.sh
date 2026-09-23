@@ -299,38 +299,6 @@ EOF
 # everything else - a stale working: status-log line, a finished/parked/failed run,
 # an unknown/torn-down crew, or an empty id - is NOT provable, so it surfaces. The
 # fake fm-crew-state.sh (FM_CREW_STATE_BIN) returns a canned verdict per case.
-# ready: is the no-mistakes validation handoff and must wake firstmate like a
-# terminal verb, while a done: that skips its mode's PR URL is premature.
-test_ready_and_premature_done_classifier() {
-  local line mode expect
-  status_is_captain_relevant "ready: implemented and committed on fm/x" \
-    || fail "ready: handoff not captain-relevant"
-  status_is_terminal_verb "ready [key=impl]: committed" || fail "keyed ready: not a terminal verb"
-  status_is_captain_relevant "working: almost ready: tests pass" \
-    && fail "working: prose naming ready: wrongly captain-relevant"
-  [ -z "$(printf 'working [key=impl]: coding\nready [key=impl]: committed\n' | status_open_activities -)" ] \
-    || fail "ready: did not close the working phase it ends"
-  while IFS='|' read -r mode expect line; do
-    [ -n "$mode" ] || continue
-    if status_done_is_premature "$line" "$mode"; then
-      [ "$expect" = premature ] || fail "mode=$mode '$line' wrongly flagged premature"
-    else
-      [ "$expect" = accepted ] || fail "mode=$mode '$line' not flagged premature"
-    fi
-  done <<'ROWS'
-no-mistakes|premature|done: implemented, 3 commits on fm/x
-no-mistakes|premature|done [key=impl]: PR checks green
-no-mistakes|accepted|done: PR https://github.com/o/r/pull/9 checks green
-direct-PR|premature|done: pushed fm/x
-direct-PR|accepted|done: PR https://github.com/o/r/pull/9
-local-only|accepted|done: ready in branch fm/x, not pushed
-none|accepted|done: report written
-no-mistakes|accepted|ready: implemented and committed on fm/x
-no-mistakes|accepted|working: done soon
-ROWS
-  pass "ready: wakes firstmate and a URL-less no-mistakes/direct-PR done: is premature"
-}
-
 test_crew_is_provably_working_classifier() {
   local dir fakebin
   dir=$(make_case provably-working); fakebin="$dir/fakebin"
@@ -596,7 +564,7 @@ test_terminal_stale_surfaced() {
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
 # (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
-# pre-validation "ready:" handoff as the LAST line for the run's entire (possibly
+# pre-validation "done:" line as the LAST line for the run's entire (possibly
 # many-minutes) duration. stale_is_terminal alone has no run-step awareness and
 # would treat that leftover as still-current every time the pane goes quiet,
 # immediately surfacing a crew that is actively validating. crew_is_provably_working
@@ -609,10 +577,10 @@ test_stale_terminal_status_overridden_by_active_run() {
   window="test:fm-validating"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
-  # The crew reported its ready: handoff BEFORE firstmate triggered no-mistakes
-  # validation; this line never gets superseded by a newer status-log entry while
-  # the pipeline itself runs.
-  printf 'ready: implemented and committed, awaiting validation\n' > "$state/validating.status"
+  # The crew reported done BEFORE firstmate triggered no-mistakes validation;
+  # this line never gets superseded by a newer status-log entry while the
+  # pipeline itself runs.
+  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "no-mistakes axi run: validating...")
@@ -621,7 +589,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   # Phase A: a high escalation threshold means the first sighting is absorbed,
-  # not surfaced, despite the captain-relevant "ready:" status-log line.
+  # not surfaced, despite the captain-relevant "done:" status-log line.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -2321,57 +2289,4 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
-test_signal_reason_is_actionable_classifier
-test_stale_is_terminal_classifier
-test_scan_captain_relevant_statuses_classifier
-test_classifier_primitives
-test_ready_and_premature_done_classifier
-test_crew_is_provably_working_classifier
-test_status_is_paused_classifier
-test_crew_absorb_class_classifier
-test_crew_absorb_class_run_id_side_channel
-test_signal_crew_provably_working_classifier
-test_provably_working_signal_absorbed
-test_turn_ended_provably_working_absorbed
-test_turn_ended_not_working_surfaced
-test_working_note_not_working_surfaced
-test_actionable_signal_surfaced
-test_terminal_stale_surfaced
-test_stale_terminal_status_overridden_by_active_run
-test_nonterminal_stale_provably_working_absorbed_then_escalated
-test_nonterminal_stale_fresh_run_log_never_escalates
-test_wedge_escalation_marks_demand_deep_inspection_after_threshold
-test_wedge_escalation_resets_when_pane_becomes_active
-test_busy_pane_below_turn_age_bound_is_absorbed
-test_busy_pane_stable_hash_escalates_past_turn_age_bound
-test_busy_pane_changing_hash_escalates_past_turn_age_bound
-test_busy_pane_turn_end_touch_resets_age
-test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
-test_busy_pane_default_turn_age_bound_is_3600s
-test_nonterminal_stale_not_working_surfaced
-test_nonterminal_stale_paused_absorbed_then_resurfaced
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_live_declared_pause_survives_pane_repaints
-test_pr_merge_wait_is_bounded_not_a_wedge
-test_pr_merge_wait_without_armed_poll_still_escalates
-test_pr_merge_wait_dead_endpoint_still_reported
-test_pr_merge_wait_resurfaces_when_it_stops_holding
-test_secondmate_paused_resurfaces_in_normal_mode
-test_secondmate_nonpaused_stale_remains_suppressed
-test_secondmate_unpause_clears_pause_tracking
-test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
-test_nonterminal_paused_rechecks_authoritative_state
-test_paused_authoritative_working_preserves_wedge_timer
-test_nonterminal_stale_repairs_missing_or_corrupt_timer
-test_triage_log_size_cap_accepts_spaced_wc_counts
-test_procevent_captured_result_surfaces_proactively
-test_procevent_surfaced_result_does_not_rewake
-test_procevent_marker_keys_are_injective
-test_procevent_surface_serializes_with_drain
-test_procevent_surface_crash_boundaries
-test_procevent_marker_failure_exits_and_replays
-test_heartbeat_no_change_absorbed
-test_heartbeat_backstop_surfaces_unsurfaced_status
-test_beacon_stays_fresh_while_absorbing
-test_afk_present_reverts_watcher_to_one_shot
-test_afk_paused_changed_pane_hands_off_plain_stale

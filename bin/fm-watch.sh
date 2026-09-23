@@ -6,9 +6,12 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# working signal is never silently swallowed. A declared external-wait pause, or
+# an idle ship crew whose PR has an armed validated merge poll (pr_merge_wait_holds),
+# is the separate idle absorb case and re-surfaces only on its long bounded
+# cadence; a declared pause's initial no-verb status signal still surfaces in
+# normal mode, while a holding PR merge wait owes no first surface because the
+# PR-ready report already reached firstmate.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -19,18 +22,20 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
-#                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
-#                          consecutive escalations on the SAME pane, the reason
-#                          also carries a "demand-deep-inspection" marker so the
-#                          wake payload itself, not just repetition, forces a
-#                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A genuinely busy pane
+#                          external-wait pause, or a live crew only waiting on its
+#                          open PR's armed merge poll, is absorbed instead with the
+#                          long PAUSE_RESURFACE_SECS cadence, never as a wedge. Only
+#                          when neither absorb class applies does the log's last line
+#                          decide: terminal (captain-relevant) or non-terminal (no
+#                          verb), both surfaced at once. A provably-working stale
+#                          past the wedge threshold also surfaces, with an
+#                          "escalation N" count in the reason; at
+#                          FM_WEDGE_DEMAND_INSPECT_COUNT consecutive escalations
+#                          on the SAME pane, the reason also carries a
+#                          "demand-deep-inspection" marker so the wake payload
+#                          itself, not just repetition, forces a closer look
+#                          instead of another routine supervision resume. Unless
+#                          afk is active. A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
@@ -178,6 +183,8 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A captain-held or paused crew whose agent has confidently exited uses the same
 # bounded cadence, while a live or ambiguously read agent surfaces once per
 # declared wait first (pause_state_class owns that surface-once decision).
+# A ship crew whose PR is open with an armed, validated merge poll is waiting on
+# that external merge too (pr_merge_wait_holds), and uses the same cadence.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -399,7 +406,7 @@ busy_turn_over_age() {  # <task>
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason wait=paused
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -410,13 +417,51 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
+  status_is_paused_or_captain_held "$(last_status_line "$statusf")" || wait="PR merge wait"
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    if [ "$wait" = paused ]; then
+      reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    else
+      reason="stale: $win (idle ${age}s, awaiting external - PR open with an armed merge poll, rechecked on a long cadence not a wedge; confirm the PR is still open and green)"
+    fi
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+  triage_log "absorbed stale ($wait, awaiting external, age ${age}s): $win"
+}
+
+# pr_merge_wait_armed: 0 iff <task> has an armed, validated, non-terminal PR
+# merge poll - the sidecar, byte-static check, and transactional registration
+# bin/fm-pr-check.sh publishes all still bind to the one canonical pr= identity
+# in the task's metadata (fm_pr_poll_artifacts_valid), and no merged result is
+# mid-retirement. A bare pr= line never qualifies, so a disarmed, doctored, or
+# half-written poll drops back to ordinary stale handling. Filesystem-only.
+pr_merge_wait_armed() {  # <task>
+  local task=$1
+  [ -n "$task" ] && fm_pr_task_id_valid "$task" || return 1
+  [ ! -e "$STATE/$task.pr-poll-retirement" ] && [ ! -L "$STATE/$task.pr-poll-retirement" ] || return 1
+  fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh"
+}
+
+# pr_merge_wait_holds: 0 iff an idle ship crew is only waiting for its PR to
+# merge, so its stale pane belongs on handle_paused_stale's bounded cadence
+# rather than the wedge timer. Reads the crew_absorb_class side channel, so the
+# caller must have just run crew_absorb_class directly (never in a subshell).
+# A merge poll alone is not enough: the crew must read working (the run is
+# still monitoring the PR) or done (checks green), carry no later open
+# decision, blocker, or failure, and have a provably alive agent, so a parked
+# gate, a red or failed run, and a dead or unreadable endpoint all keep
+# today's surface or wedge escalation.
+pr_merge_wait_holds() {  # <window> <task>
+  local win=$1 task=$2
+  [ "$(window_kind "$win")" != secondmate ] || return 1
+  case "$CREW_ABSORB_STATE" in working|done) ;; *) return 1 ;; esac
+  case "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" in
+    needs-decision|blocked|failed) return 1 ;;
+  esac
+  pr_merge_wait_armed "$task" || return 1
+  [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null)" = alive ]
 }
 
 clear_pause_state() {  # <window>
@@ -450,6 +495,9 @@ clear_pause_tracking() {  # <window>
 # handle_paused_stale's PAUSE_RESURFACE_SECS cadence - the one owner of the
 # bounded re-surface - so the wait still cannot rot invisibly, and it re-surfaces
 # with the declared-pause reason rather than a bare stale.
+# A crew with no declaration that is only waiting on its open PR's merge
+# (pr_merge_wait_holds) takes that same bounded cadence directly: the PR-ready
+# report already reached firstmate, so no surface is owed first.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive ordinary=0
   key=${win//:/_}
@@ -458,8 +506,25 @@ pause_state_class() {  # <window> <task>
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
+    # An open PR with an armed merge poll is an external wait with no
+    # declaration to surface first. Its cheap repeat path still re-validates
+    # the poll registration every call, so a disarmed or invalid poll drops out
+    # at once; crew state and liveness are re-read every STALE_ESCALATE_SECS.
+    if pr_merge_wait_armed "$task"; then
+      if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+        printf 'paused'
+        return
+      fi
+      crew_absorb_class "$task" >/dev/null
+      if pr_merge_wait_holds "$win" "$task"; then
+        date +%s > "$recheck_file"
+        printf 'paused'
+        return
+      fi
+    else
+      crew_absorb_class "$task" >/dev/null
+    fi
     rm -f "$recheck_file"
-    crew_absorb_class "$task" >/dev/null
     if [ "$CREW_ABSORB_CLASS" = working ]; then
       printf 'working %s' "$CREW_ABSORB_RUN_ID"
     else
@@ -476,9 +541,15 @@ pause_state_class() {  # <window> <task>
     return
   fi
   # An actively-running pipeline outranks the declared wait, the same run-step
-  # precedence fm-crew-state itself applies, so this is decided before liveness.
+  # precedence fm-crew-state itself applies, so this is decided before liveness -
+  # unless that run is only monitoring an open PR for its merge.
   crew_absorb_class "$task" >/dev/null
   class=$CREW_ABSORB_CLASS
+  if [ "$class" = working ] && pr_merge_wait_holds "$win" "$task"; then
+    date +%s > "$recheck_file"
+    printf 'paused'
+    return
+  fi
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working %s' "$CREW_ABSORB_RUN_ID"
@@ -1032,7 +1103,8 @@ EOF
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ] \
+      && ! pr_merge_wait_armed "$task"; then
       clear_pause_tracking "$w"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
@@ -1088,19 +1160,38 @@ EOF
           # line. On a NEW hash, give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
+          # pause_state_class makes that same crew-state read, and also lets an
+          # open PR's armed merge poll put a finished crew on the bounded
+          # external-wait cadence instead of the wedge timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            crew_absorb_class "$task" >/dev/null
-            if [ "$CREW_ABSORB_CLASS" = working ]; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
-              write_active_run "$arf" "$CREW_ABSORB_RUN_ID"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            pause_class_out=$(pause_state_class "$w" "$task")
+            case "$pause_class_out" in
+              working*)
+                printf '%s' "$h" > "$sf"
+                date +%s > "$ssf"
+                write_active_run "$arf" "${pause_class_out#working }"
+                triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+                ;;
+              *)
+                if [ "$pause_class_out" = paused ] && pr_merge_wait_armed "$task"; then
+                  handle_paused_stale "$w" "$task" "$h"
+                else
+                  fm_wake_append stale "$w" "stale: $w" || exit 1
+                  printf '%s' "$h" > "$sf"
+                  rm -f "$ssf" "$arf"
+                  mark_surfaced "$STATE/$task.status"
+                  wake "stale: $w"
+                fi
+                ;;
+            esac
+          elif [ -e "$pf" ]; then
+            # An open-PR merge wait already on the bounded cadence: keep it
+            # there while it still holds, else drop the tracking so the next
+            # poll reclassifies this hash from scratch.
+            if [ "$(pause_state_class "$w" "$task")" = paused ]; then
+              handle_paused_stale "$w" "$task" "$h"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf" "$arf"
-              mark_surfaced "$STATE/$task.status"
-              wake "stale: $w"
+              clear_pause_tracking "$w"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -1119,9 +1210,10 @@ EOF
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - paused: the crew declared an external wait, or a declared pause or
-          #     captain hold is paired with a confidently dead agent, so absorb on
-          #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - paused: the crew declared an external wait, a declared pause or
+          #     captain hold is paired with a confidently dead agent, or a live
+          #     crew is only waiting on its open PR's armed merge poll, so absorb
+          #     on the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
           #   - none: no running pipeline, no exact busy verdict, and either no
           #     declared pause at all or one whose live agent still owes its single
           #     surface - pause_state_class owns that surface-once decision, and
@@ -1159,7 +1251,13 @@ EOF
                          write_active_run "$arf" "${pause_class_out#working }"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$arf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)       if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+                           handle_paused_stale "$w" "$task" "$h"
+                         else
+                           # An open-PR merge wait that no longer holds has no
+                           # declaration to govern: reclassify next poll.
+                           clear_pause_tracking "$w"
+                         fi ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$arf"
@@ -1175,7 +1273,7 @@ EOF
         else
           rm -f "$ssf" "$ewf" "$arf"
         fi
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! { status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" || pr_merge_wait_armed "$task"; }; }; then
           clear_pause_tracking "$w"
         fi
       fi
@@ -1188,7 +1286,9 @@ EOF
         rm -f "$ssf" "$ewf" "$arf"
       fi
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+      if ! afk_present && [ "$busy_now" -ne 0 ] \
+        && { status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" \
+          || { [ -e "$pf" ] && pr_merge_wait_armed "$task"; }; }; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$w" ;;
