@@ -529,6 +529,74 @@ test_premature_done_keeps_decision_open_classifier() {
   pass "a premature no-mistakes/direct-PR done: leaves an open decision open; a delivered done:, a local-only ship's done:, and a scout's done: still close it"
 }
 
+# A URL-less done: after the task's PR is recorded merged is delivery. pr= in
+# meta, written when the poll is armed, is not that record, and neither is a
+# retirement-receipt file sitting beside the task. The recorded merge is the
+# merge-notification marker (bin/fm-pr-lib.sh). An incremental cursor folded
+# before that marker must be rebuilt once the marker appears, or it would keep
+# a decision open that the whole-file fold now closes.
+test_post_merge_url_less_done_is_not_premature() {
+  local dir line
+  dir="$TMP_ROOT/post-merge-done"
+  mkdir -p "$dir"
+  line='done [at=1750000099]: post-merge verification passed, retained memory flat'
+
+  printf '%s\n' \
+    'window=test:armed' \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'pr=https://github.com/Aviator-Coding/home-ops/pull/1754' \
+    > "$dir/armed.meta"
+  printf 'merged\n' > "$dir/armed.pr-poll-retirement"
+  printf 'needs-decision [key=q]: pick a route\n%s\n' "$line" > "$dir/armed.status"
+  status_done_is_premature "$line" no-mistakes "$dir" armed \
+    || fail "an armed-but-not-merged URL-less done: was not flagged premature"
+  status_open_decisions "$dir/armed.status" | grep -F $'q\t' >/dev/null \
+    || fail "an armed-but-not-merged URL-less done: closed an open decision"
+  status_open_decisions_incremental "$dir/armed.status" | grep -F $'q\t' >/dev/null \
+    || fail "the incremental fold closed an armed-but-not-merged decision"
+
+  printf '%s\n' \
+    'window=test:postmerge' \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'pr=https://github.com/Aviator-Coding/home-ops/pull/1754' \
+    > "$dir/postmerge.meta"
+  printf 'needs-decision [key=q]: pick a route\n%s\n' "$line" > "$dir/postmerge.status"
+  status_done_is_premature "$line" no-mistakes "$dir" postmerge \
+    || fail "a URL-less done: was not premature before the merge was recorded"
+  status_open_decisions_incremental "$dir/postmerge.status" | grep -F $'q\t' >/dev/null \
+    || fail "the pre-merge incremental fold closed the decision"
+  fm_pr_poll_merge_mark_notified "$dir" postmerge github github.com Aviator-Coding/home-ops 1754 \
+    || fail "could not record the merged PR through its owner"
+  if status_done_is_premature "$line" no-mistakes "$dir" postmerge; then
+    fail "a post-merge URL-less done: was flagged premature"
+  fi
+  [ -z "$(status_open_decisions "$dir/postmerge.status")" ] \
+    || fail "a post-merge URL-less done: left a decision open"
+  [ -z "$(status_open_decisions_incremental "$dir/postmerge.status")" ] \
+    || fail "the incremental fold left a decision open after the merge was recorded"
+
+  printf '%s\n' \
+    'window=test:postmerge-pr' \
+    'kind=ship' \
+    'mode=direct-PR' \
+    'pr=https://github.com/Aviator-Coding/home-ops/pull/1754' \
+    > "$dir/postmerge-pr.meta"
+  printf 'needs-decision [key=q]: pick a route\n%s\n' "$line" > "$dir/postmerge-pr.status"
+  fm_pr_poll_merge_mark_notified "$dir" postmerge-pr github github.com Aviator-Coding/home-ops 1754 \
+    || fail "could not record the direct-PR merge through its owner"
+  if status_done_is_premature "$line" direct-PR "$dir" postmerge-pr; then
+    fail "a post-merge direct-PR URL-less done: was flagged premature"
+  fi
+  [ -z "$(status_open_decisions "$dir/postmerge-pr.status")" ] \
+    || fail "a post-merge direct-PR URL-less done: left a decision open"
+  [ -z "$(status_open_decisions_incremental "$dir/postmerge-pr.status")" ] \
+    || fail "the incremental fold left a direct-PR decision open after the merge was recorded"
+
+  pass "a URL-less done: is not premature once the PR is recorded merged, and stays premature while the poll is only armed"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -6358,6 +6426,7 @@ test_stale_is_terminal_classifier
 test_classifier_primitives
 test_ready_and_premature_done_classifier
 test_premature_done_keeps_decision_open_classifier
+test_post_merge_url_less_done_is_not_premature
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier

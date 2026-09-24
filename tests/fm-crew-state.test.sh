@@ -2382,6 +2382,45 @@ ROWS
   pass "no run + idle pane: ready: is parked and a URL-less PR-mode done: is a premature done"
 }
 
+# The reported post-merge case: once the merge-notification marker records the
+# PR, a URL-less verification done: is delivered. The same line while pr= is
+# only armed stays a premature done.
+test_post_merge_url_less_done_is_delivered() {
+  reset_fakes
+  local d out
+  d=$(new_case post-merge-done)
+  make_repo_on_branch "$d/wt" fm/post-merge
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/postmerge.meta" "window=fm:fm-postmerge" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "mode=no-mistakes" \
+    "pr=https://github.com/Aviator-Coding/home-ops/pull/1754"
+  printf 'done [at=1750000099]: post-merge verification passed, retained memory flat\n' \
+    > "$d/state/postmerge.status"
+  arm_idle_record "$d/state" postmerge
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  fm_pr_poll_merge_mark_notified "$d/state" postmerge github github.com Aviator-Coding/home-ops 1754 \
+    || fail "could not record the merged PR through its owner"
+  out=$(run_crew_state "$d" postmerge)
+  assert_contains "$out" "state: done · source: status-log" "post-merge URL-less done: should read as delivered"
+  assert_not_contains "$out" "premature done" "post-merge URL-less done: was flagged premature"
+  assert_contains "$out" "post-merge verification passed, retained memory flat" "the verification note is the detail"
+
+  d=$(new_case armed-not-merged)
+  make_repo_on_branch "$d/wt" fm/armed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/armed.meta" "window=fm:fm-armed" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "mode=no-mistakes" \
+    "pr=https://github.com/Aviator-Coding/home-ops/pull/1754"
+  printf 'done [at=1750000099]: post-merge verification passed, retained memory flat\n' \
+    > "$d/state/armed.status"
+  arm_idle_record "$d/state" armed
+  out=$(run_crew_state "$d" armed)
+  assert_contains "$out" "state: blocked · source: status-log" "armed-but-not-merged URL-less done: should stay blocked"
+  assert_contains "$out" "premature done: mode=no-mistakes" "armed-but-not-merged URL-less done: was not flagged"
+  pass "crew state treats a URL-less done: as delivered once the PR is recorded merged, and still flags it while the poll is only armed"
+}
+
 # (g') no run + idle pane on a DECLARED external-wait pause -> state: paused, so a
 # supervisor reading the crew sees a distinct pause (and its reason) rather than a
 # wedge-suspect idle. This is the reader half the watcher/daemon build on.
@@ -5178,6 +5217,7 @@ test_idle_working_status_log_is_not_current_working
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_delivery_mode_done_lines
+test_post_merge_url_less_done_is_delivered
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
