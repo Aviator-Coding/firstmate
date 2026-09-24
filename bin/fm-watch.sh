@@ -1692,19 +1692,9 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
-# pr_merge_wait_armed: 0 iff <task> has an armed, validated, non-terminal PR
-# merge poll - the sidecar, byte-static check, and transactional registration
-# bin/fm-pr-check.sh publishes all still bind to the one canonical pr= identity
-# in the task's metadata (fm_pr_poll_artifacts_valid), and no merged result is
-# mid-retirement. A bare pr= line never qualifies, so a disarmed, doctored, or
-# half-written poll drops back to ordinary stale handling. Filesystem-only; on
-# success FM_PR_REG_DATA_IDENTITY and FM_PR_REG_CHECK_IDENTITY name the live
-# registration.
+# fm_pr_merge_wait_armed in bin/fm-pr-lib.sh owns the poll predicate.
 pr_merge_wait_armed() {  # <task>
-  local task=$1
-  [ -n "$task" ] && fm_pr_task_id_valid "$task" || return 1
-  [ ! -e "$STATE/$task.pr-poll-retirement" ] && [ ! -L "$STATE/$task.pr-poll-retirement" ] || return 1
-  fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh"
+  fm_pr_merge_wait_armed "$STATE" "$1" "$SCRIPT_DIR/fm-pr-poll.sh"
 }
 
 # The same new-hash bound as captain_call_stale_bound, for a delivered ship crew

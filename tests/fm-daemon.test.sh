@@ -4,7 +4,8 @@
 # decision-owned queued-row suppression, afk presence-gating, and the
 # injection-hardening units that an e2e cannot deterministically reach
 # (persistent-Enter-swallow, max-defer wedge alarms, fm-send typed-plane swallow
-# reporting, composer-pending ANSI parsing). The operator-visible inject flow
+# reporting, composer-pending ANSI parsing), and the armed merge-poll exemption
+# from away-mode wedge escalation. The operator-visible inject flow
 # lives in fm-afk-inject-e2e and fm-wake-daemon-lifecycle-e2e.
 set -u
 
@@ -2907,6 +2908,178 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+# Away mode used to wedge a delivered ship whose only remaining wait was an
+# armed PR merge poll. The normal watcher already bounds that wait; while
+# state/.afk exists the daemon is what ages the stale marker. A marker that
+# started before the done line must stop once the poll is armed, and the
+# enriched wedge override must not force-escalate it. A missing, retired, or
+# invalid poll, and a crew that is still working, keep the wedge.
+DAEMON_PRWAIT_URL='https://github.com/example/repo/pull/7'
+
+daemon_prwait_arm() {  # <dir> <task>
+  local dir=$1 task=$2 out
+  printf '#!/usr/bin/env bash\nprintf "OPEN\\n"\n' > "$dir/fakebin/gh"
+  chmod +x "$dir/fakebin/gh"
+  if ! out=$(FM_STATE_OVERRIDE="$dir/state" FM_GUARD_GRACE=999999 PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" "$task" "$DAEMON_PRWAIT_URL" 2>&1); then
+    printf 'fm-pr-check failed: %s\n' "$out" >&2
+    return 1
+  fi
+  [ -s "$dir/state/$task.pr-poll-registration" ]
+}
+
+daemon_prwait_retire() {  # <state> <task>
+  fm_pr_poll_snapshot_capture "$1" "$2" "$ROOT/bin/fm-pr-poll.sh" \
+    && fm_pr_poll_retirement_publish "$1" "$2" "$ROOT/bin/fm-pr-poll.sh" merged \
+    && [ -e "$1/$2.pr-poll-retirement" ]
+}
+
+# The stale marker is written while the log still says working, then the final
+# line is appended, so the marker began aging before that line. <seen> 1 marks
+# the log already escalated. Prints the case directory.
+daemon_prwait_home() {  # <name> <poll:armed|none|retired|invalid> <status:done|working> <age-seconds> <seen:0|1>
+  local name=$1 poll=$2 status_kind=$3 age=$4 seen=$5 dir state task line
+  dir=$(make_supercase "prwait-$name")
+  state="$dir/state"
+  task="prwait-$name"
+  fm_write_meta "$state/$task.meta" \
+    "window=sess:fm-$task" "backend=tmux" "kind=ship" "mode=no-mistakes" "harness=grok"
+  printf 'working: validation still running\n' > "$state/$task.status"
+  echo $(( $(date +%s) - age )) > "$state/.subsuper-stale-$(printf '%s' "$task" | tr ':/.' '___')"
+  case "$status_kind" in
+    done) line="done: PR $DAEMON_PRWAIT_URL checks green" ;;
+    working) line='working: still editing' ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$line" >> "$state/$task.status"
+  [ "$seen" = 1 ] && seen_through "$state" "$task"
+  case "$poll" in
+    armed|retired|invalid) daemon_prwait_arm "$dir" "$task" || return 1 ;;
+    none) printf 'pr=%s\n' "$DAEMON_PRWAIT_URL" >> "$state/$task.meta" ;;
+    *) return 1 ;;
+  esac
+  case "$poll" in
+    retired) daemon_prwait_retire "$state" "$task" || return 1 ;;
+    invalid)
+      printf '#!/usr/bin/env bash\nexit 0\n' > "$state/$task.check.sh"
+      chmod 0600 "$state/$task.check.sh"
+      ;;
+  esac
+  printf '%s\n' "$dir"
+}
+
+daemon_prwait_housekeeping() {  # <dir>
+  local dir=$1 state task win pane
+  state="$dir/state"
+  task=$(basename "$dir")
+  win="sess:fm-$task"
+  pane="$dir/pane.txt"
+  printf 'idle prompt $\n' > "$pane"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_STALE_ESCALATE_SECS=240 \
+    housekeeping "$state"
+}
+
+daemon_prwait_override() {  # <dir>
+  local dir=$1 state task win reason
+  state="$dir/state"
+  task=$(basename "$dir")
+  win="sess:fm-$task"
+  printf 'idle prompt $\n' > "$dir/pane.txt"
+  reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+}
+
+test_armed_pr_merge_wait_is_not_a_daemon_wedge() {
+  local spec name path poll status_kind age expect dir state task key wedges
+  for spec in \
+    'hk-armed-old|housekeeping|armed|done|500|quiet' \
+    'hk-armed-young|housekeeping|armed|done|10|quiet' \
+    'ov-armed|override|armed|done|500|quiet' \
+    'hk-none|housekeeping|none|done|500|wedge' \
+    'ov-none|override|none|done|500|wedge' \
+    'hk-retired|housekeeping|retired|done|500|wedge' \
+    'ov-retired|override|retired|done|500|wedge' \
+    'hk-invalid|housekeeping|invalid|done|500|wedge' \
+    'ov-invalid|override|invalid|done|500|wedge' \
+    'hk-working|housekeeping|armed|working|500|wedge' \
+    'ov-working|override|armed|working|500|wedge'
+  do
+    IFS='|' read -r name path poll status_kind age expect <<EOF
+$spec
+EOF
+    dir=$(daemon_prwait_home "$name" "$poll" "$status_kind" "$age" 1) \
+      || fail "[$name] could not build the merge-poll fixture"
+    state="$dir/state"
+    task=$(basename "$dir")
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    case "$path" in
+      housekeeping) daemon_prwait_housekeeping "$dir" ;;
+      override) daemon_prwait_override "$dir" ;;
+      *) fail "[$name] unknown path $path" ;;
+    esac
+    if [ "$expect" = quiet ]; then
+      [ ! -s "$state/.subsuper-escalations" ] \
+        || fail "[$name] escalated a delivered ship waiting on its merge poll: $(cat "$state/.subsuper-escalations")"
+      [ ! -e "$state/.subsuper-stale-$key" ] \
+        || fail "[$name] left a stale marker running after the merge wait held"
+    else
+      [ -s "$state/.subsuper-escalations" ] || fail "[$name] did not escalate"
+      wedges=$(grep -c 'possible wedge' "$state/.subsuper-escalations" || true)
+      [ "$wedges" = 1 ] \
+        || fail "[$name] produced $wedges possible-wedge lines: $(cat "$state/.subsuper-escalations")"
+      [ ! -e "$state/.subsuper-stale-$key" ] \
+        || fail "[$name] kept the stale marker after escalating"
+    fi
+  done
+
+  # The done signal arrives before the poll is armed: the marker that was
+  # already aging must survive that signal, then stop once the poll is armed
+  # without a possible-wedge escalation on the following housekeeping pass.
+  dir=$(daemon_prwait_home signal none "done" 500 0) \
+    || fail "[signal] could not build the pre-arm fixture"
+  state="$dir/state"
+  task=$(basename "$dir")
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" \
+    handle_wake "signal: $state/$task.status" "$state"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "[signal] the done signal cleared the stale marker before the merge poll was armed"
+  wedges=$(grep -c 'possible wedge' "$state/.subsuper-escalations" || true)
+  [ "$wedges" = 0 ] \
+    || fail "[signal] the done signal was reported as a possible wedge: $(cat "$state/.subsuper-escalations")"
+  grep -F "$DAEMON_PRWAIT_URL" "$state/.subsuper-escalations" >/dev/null \
+    || fail "[signal] the done signal was not escalated"
+  daemon_prwait_arm "$dir" "$task" \
+    || fail "[signal] could not arm the merge poll after the done signal"
+  daemon_prwait_housekeeping "$dir"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "[signal] housekeeping left the pre-done marker running after the poll was armed"
+  wedges=$(grep -c 'possible wedge' "$state/.subsuper-escalations" || true)
+  [ "$wedges" = 0 ] \
+    || fail "[signal] housekeeping wedge-escalated the armed merge wait: $(cat "$state/.subsuper-escalations")"
+
+  # The poll is already armed when the done line arrives. The signal itself
+  # must stop the marker that started aging before that line, without waiting
+  # for the next housekeeping tick and without dropping the done escalation.
+  dir=$(daemon_prwait_home armed-signal armed "done" 500 0) \
+    || fail "[armed-signal] could not build the already-armed fixture"
+  state="$dir/state"
+  task=$(basename "$dir")
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" \
+    handle_wake "signal: $state/$task.status" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "[armed-signal] the done signal left the pre-done marker running on an already-armed poll"
+  wedges=$(grep -c 'possible wedge' "$state/.subsuper-escalations" || true)
+  [ "$wedges" = 0 ] \
+    || fail "[armed-signal] the done signal was reported as a possible wedge: $(cat "$state/.subsuper-escalations")"
+  grep -F "$DAEMON_PRWAIT_URL" "$state/.subsuper-escalations" >/dev/null \
+    || fail "[armed-signal] the done signal was not escalated"
+
+  pass "an armed merge poll is not an away-mode wedge, and a missing, retired, or invalid poll still is"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2916,6 +3089,7 @@ test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
+test_armed_pr_merge_wait_is_not_a_daemon_wedge
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence

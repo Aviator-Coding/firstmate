@@ -617,6 +617,22 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ]
 }
 
+# 0 iff <task> has an armed, validated, non-terminal PR merge poll in <state>.
+# The sidecar, byte-static check, and transactional registration still bind to
+# the one canonical pr= identity (fm_pr_poll_artifacts_valid), and no merged
+# result is mid-retirement. A bare pr= line never qualifies, so a disarmed,
+# doctored, or half-written poll is not a wait. <template> is the byte-static
+# poll script the registration must match (bin/fm-pr-poll.sh). Filesystem-only.
+# On success FM_PR_REG_DATA_IDENTITY and FM_PR_REG_CHECK_IDENTITY name the live
+# registration. Callers that add a crew, liveness, or throttle condition on top
+# keep that condition themselves; this is the poll predicate they share.
+fm_pr_merge_wait_armed() {  # <state> <task> <template>
+  local state=$1 task=$2 template=$3
+  [ -n "$task" ] && fm_pr_task_id_valid "$task" || return 1
+  [ ! -e "$state/$task.pr-poll-retirement" ] && [ ! -L "$state/$task.pr-poll-retirement" ] || return 1
+  fm_pr_poll_artifacts_valid "$state" "$task" "$template"
+}
+
 # Everything fm_pr_poll_artifacts_valid proves except that the registration's
 # recorded file identities name the live sidecar and check. Success alone is
 # never authentication. On success FM_PR_DATA_*, FM_PR_REG_*, and FM_PR_META_*
