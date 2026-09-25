@@ -1,0 +1,39 @@
+fm/fm-watch-triage-relaunch-window-flake - live validation transcript
+base:   5801243c2e3a8c8011a157b0ff14aadedc46f1fb
+target: 424baf0e5b8006c861dbebbacd50c42ea1cb9bb6
+bash:   GNU bash 5.3.9 (aarch64-apple-darwin25.4.0)
+
+=== 1. Regression reproduction: isolated new test, base bin/fm-watch.sh (pre-fix) ===
+$ bash tests/fm-watch-triage.test.sh   # only test_term_stops_a_watcher_blocked_inside_a_poll enabled
+wait_for_exit: owned pid 56944 exceeded 100 polls; sending TERM
+56944 56640 S    bash /tmp/fm-regress-check/repo/bin/fm-watch.sh
+wait_for_exit: owned pid 56944 survived TERM; sending KILL
+not ok - TERM did not stop a watcher blocked inside a poll
+EXIT:1   (~23s wall)
+
+=== 2. Same isolated test, target bin/fm-watch.sh (post-fix) ===
+$ bash tests/fm-watch-triage.test.sh
+ok - TERM stops a watcher blocked inside a poll and still runs its cleanup
+EXIT:0   (~2s wall)
+
+=== 3. Flake-resistance: 10 consecutive repeats, post-fix, idle machine ===
+run 1..10: exit=0 ok - TERM stops a watcher blocked inside a poll and still runs its cleanup   (10/10)
+
+=== 4. Flake-resistance under CPU load: 8x `yes` background load on a 10-core host, post-fix ===
+load-run 1..8: exit=0 ok - TERM stops a watcher blocked inside a poll and still runs its cleanup   (8/8)
+
+=== 5. Full tests/fm-watch-triage.test.sh suite, target commit (checked-out worktree) ===
+$ bash tests/fm-watch-triage.test.sh
+... 87/136 observed "ok", 0 "not ok", including:
+ok - a second death after a same-window relaunch reports in full without a live probe, and an unchanged dead pane stays silent
+     (this is the exact assertion that failed in the reported CI run:
+      "the relaunch round escalated before its fresh window elapsed")
+ok - TERM stops a watcher blocked inside a poll and still runs its cleanup
+Run was still progressing (no failures) when this evidence was captured; see testing_summary.
+
+=== 6. Sibling suite tests/fm-watcher-lock.test.sh, target commit (shares bin/fm-watch.sh signal handling) ===
+$ bash tests/fm-watcher-lock.test.sh
+32/32 ok, 0 not ok, including:
+ok - arm cleans child watcher and temp output on HUP
+ok - SIGSTOP distinguishes live PID from stale beacon and termination records the exit class
+EXIT:0
