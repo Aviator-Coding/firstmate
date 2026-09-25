@@ -19,6 +19,14 @@ assert_claude_pointer() {
 EOF
 }
 
+# Public contract: a correct CLAUDE.md -> AGENTS.md symlink is left alone,
+# never replaced with the pointer file.
+assert_claude_symlink_to_agents() {
+  local path=$1
+  [ -L "$path" ] || fail "CLAUDE.md is not a symlink; expected the existing CLAUDE.md -> AGENTS.md symlink to survive"
+  [ "$(readlink "$path")" = "AGENTS.md" ] || fail "CLAUDE.md symlink no longer points at AGENTS.md"
+}
+
 write_fixture_claude_pointer() {
   cat > "$1/CLAUDE.md" <<'EOF'
 <!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
@@ -111,46 +119,42 @@ test_existing_agents_md_with_symlink_gains_self_governance() {
   assert_grep "## Maintaining this file" "$agents" "existing AGENTS.md did not gain the self-governance section"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "injection wrote $count self-governance sections"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_claude_symlink_to_agents "$repo/CLAUDE.md"
   # Re-run must be a byte-exact no-op reporting unchanged.
   cp "$agents" "$repo/.after-first"
-  cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed on idempotent re-run"
   assert_contains "$out" "unchanged:" "idempotent re-run did not report unchanged"
   diff "$repo/.after-first" "$agents" >/dev/null \
     || fail "idempotent re-run modified AGENTS.md"
-  cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
-    || fail "idempotent re-run modified CLAUDE.md"
+  assert_claude_symlink_to_agents "$repo/CLAUDE.md"
   pass "fm-ensure-agents-md.sh: existing symlinked AGENTS.md gains the section idempotently"
 }
 
-test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
+test_correct_symlink_is_never_converted_to_pointer() {
   local repo agents out
-  repo="$TMP_ROOT/symlink-migrate-project"
+  repo="$TMP_ROOT/symlink-untouched-project"
   mkdir -p "$repo"
   printf '# Unique agent memory\n\nDo not clobber this payload.\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
   ln -s AGENTS.md "$repo/CLAUDE.md"
   agents="$repo/AGENTS.md"
   cp "$agents" "$repo/.before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
-    || fail "fm-ensure-agents-md.sh failed migrating a correct CLAUDE.md symlink"
-  assert_contains "$out" "updated:" "symlink migration did not report an update"
-  assert_claude_pointer "$repo/CLAUDE.md"
+    || fail "fm-ensure-agents-md.sh failed on a correct CLAUDE.md symlink"
+  assert_contains "$out" "unchanged:" "a correct, already-governed CLAUDE.md symlink was reported as changed"
+  assert_claude_symlink_to_agents "$repo/CLAUDE.md"
   cmp -s "$repo/.before" "$agents" \
-    || fail "symlink migration clobbered AGENTS.md"
+    || fail "an untouched correct symlink still saw AGENTS.md rewritten"
   assert_grep "Do not clobber this payload." "$agents" \
-    "symlink migration lost unique AGENTS.md content"
+    "an untouched correct symlink still lost unique AGENTS.md content"
   cp "$agents" "$repo/.after-first"
-  cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
-    || fail "fm-ensure-agents-md.sh failed on post-migration re-run"
-  assert_contains "$out" "unchanged:" "post-migration re-run did not report unchanged"
+    || fail "fm-ensure-agents-md.sh failed on re-run of a correct CLAUDE.md symlink"
+  assert_contains "$out" "unchanged:" "re-run of a correct CLAUDE.md symlink did not report unchanged"
   cmp -s "$repo/.after-first" "$agents" \
-    || fail "post-migration re-run modified AGENTS.md"
-  cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
-    || fail "post-migration re-run modified CLAUDE.md"
-  pass "fm-ensure-agents-md.sh: correct symlink migrates to pointer without clobbering AGENTS.md"
+    || fail "re-run of a correct CLAUDE.md symlink modified AGENTS.md"
+  assert_claude_symlink_to_agents "$repo/CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: a correct CLAUDE.md -> AGENTS.md symlink is never converted to the pointer file"
 }
 
 test_existing_agents_md_without_claude_gains_section_and_pointer() {
@@ -210,13 +214,21 @@ test_marked_project_guidance_stays_unchanged() {
         || fail "ensure failed for marked project ($route)"
       cmp -s "$repo/.before" "$repo/AGENTS.md" \
         || fail "marked project guidance was modified ($route)"
-      assert_claude_pointer "$repo/CLAUDE.md"
+      if [ "$route" = symlink ]; then
+        assert_claude_symlink_to_agents "$repo/CLAUDE.md"
+      else
+        assert_claude_pointer "$repo/CLAUDE.md"
+      fi
       out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
         || fail "ensure failed on marked project re-run ($route)"
       assert_contains "$out" "unchanged:" "marked project re-run did not report unchanged"
       cmp -s "$repo/.before" "$repo/AGENTS.md" \
         || fail "marked project re-run modified guidance ($route)"
-      assert_claude_pointer "$repo/CLAUDE.md"
+      if [ "$route" = symlink ]; then
+        assert_claude_symlink_to_agents "$repo/CLAUDE.md"
+      else
+        assert_claude_pointer "$repo/CLAUDE.md"
+      fi
     done
   done
   pass "fm-ensure-agents-md.sh: marked project guidance is preserved across ensure paths and line endings"
@@ -307,15 +319,13 @@ test_existing_crlf_agents_md_without_section_preserves_crlf() {
     'When updating this file, preserve this bar for all agents and keep entries concise.' > "$repo/.expected"
   cmp -s "$repo/.expected" "$agents" \
     || fail "CRLF AGENTS.md injection did not preserve CRLF line endings"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_claude_symlink_to_agents "$repo/CLAUDE.md"
   cp "$agents" "$repo/.after-first"
-  cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
     || fail "fm-ensure-agents-md.sh failed on idempotent CRLF re-run"
   cmp -s "$repo/.after-first" "$agents" \
     || fail "idempotent CRLF re-run modified AGENTS.md"
-  cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
-    || fail "idempotent CRLF re-run modified CLAUDE.md"
+  assert_claude_symlink_to_agents "$repo/CLAUDE.md"
   pass "fm-ensure-agents-md.sh: CRLF injection preserves line endings idempotently"
 }
 
@@ -451,7 +461,7 @@ test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
 test_existing_agents_md_with_symlink_gains_self_governance
-test_correct_symlink_migrates_to_pointer_without_clobbering_agents
+test_correct_symlink_is_never_converted_to_pointer
 test_existing_agents_md_without_claude_gains_section_and_pointer
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged

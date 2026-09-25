@@ -4,9 +4,11 @@
 # real regular file whose canonical content is the two-line @AGENTS.md pointer
 # that Claude Code inlines at load time. Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
-# file present (unless it is already the canonical pointer), converts a correct
-# CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
-# distinct real files or wrong symlinks.
+# file present (unless it is already the canonical pointer), and refuses to
+# clobber distinct real files or wrong symlinks. A CLAUDE.md that is already a
+# correct symlink to AGENTS.md already satisfies the convention on its own, so
+# the installer leaves that symlink untouched rather than replacing it with
+# the pointer file.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
@@ -200,11 +202,10 @@ if [ -e "$AGENTS" ]; then
   if [ -L "$CLAUDE" ]; then
     if is_correct_claude_symlink; then
       ensure_maintenance_section
-      install_claude_pointer
       if [ "$MAINT_INJECTED" -eq 1 ]; then
-        echo "updated: added ## Maintaining this file to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
+        echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
       else
-        echo "updated: replaced CLAUDE.md symlink with @AGENTS.md pointer in $DIR"
+        echo "unchanged: AGENTS.md with CLAUDE.md -> AGENTS.md symlink in $DIR"
       fi
       exit 0
     fi
