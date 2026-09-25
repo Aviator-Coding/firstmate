@@ -24,12 +24,23 @@ make_home() {  # <name>
   # tests/lib.sh, not with a shell array: make_home runs inside a command
   # substitution, where an array append never reaches the caller.
   fm_test_track_procevent_home "$home" "$home/procevent-claims"
-  mkdir -p "$home/state" "$home/data"
+  mkdir -p "$home/state" "$home/data" "$home/lavish-state"
   fakebin=$(fm_fakebin "$home")
   # The build proves the board session is live before it arms anything, so the
   # stub reports the opened shape the real lavish-axi emits. This suite is about
   # what the template renders, not about session liveness, which
   # tests/fm-bearings-board.test.sh owns.
+  #
+  # Arming a fresh board always races reconcile's detached listener into
+  # claiming the source (bin/fm-bearings-board.sh's `owner != live` branch), and
+  # that listener is the real fm-procevent-lavish.sh poll, not a fake: it
+  # resolves the session it should poll from LAVISH_AXI_STATE_DIR/state.json
+  # before ever exec-ing this stub's `poll` case. Without a matching entry
+  # there, that resolution dies immediately, so the listener exits right after
+  # claiming its source instead of blocking - a claim-then-exit race that
+  # showed up as an intermittent "not listening after reconcile" failure.
+  # Writing the same session-store shape tests/fm-bearings-board.test.sh uses
+  # keeps the claim held for as long as the stub's `poll` case blocks.
   cat > "$fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1-}" in
@@ -37,7 +48,7 @@ case "${1-}" in
   '')
     printf 'sessions[1]{file,status,url,pending_prompts}:\n'
     [ ! -s "$FM_HOME/lavish-open" ] \
-      || printf '  %s,open,"http://127.0.0.1/session/render",0\n' "$(cat "$FM_HOME/lavish-open")"
+      || printf '  %s,open,"http://127.0.0.1:4387/session/0123456789abcdef",0\n' "$(cat "$FM_HOME/lavish-open")"
     ;;
   poll)
     # Bounded, so a listener that escapes its test stops on its own.
@@ -47,6 +58,9 @@ case "${1-}" in
   *)
     real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
     printf '%s\n' "$real" > "$FM_HOME/lavish-open"
+    jq -n --arg file "$real" \
+      '{sessions:{"0123456789abcdef":{file:$file,url:"http://127.0.0.1:4387/session/0123456789abcdef"}}}' \
+      > "$LAVISH_AXI_STATE_DIR/state.json"
     printf 'session:\n  status: opened\n'
     ;;
 esac
@@ -68,6 +82,7 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   node "$HARNESS" "$home/.lavish/bearings-board.html" \
     || fail "the built board could not be rendered"
