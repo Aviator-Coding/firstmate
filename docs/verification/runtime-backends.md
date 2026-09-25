@@ -1381,6 +1381,24 @@ Part C is the case the suite could not reach before: a doomed pane whose shell h
 On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
 The suite also cross-checks its own Part A measurement against the floor classifier on whatever release it runs, so a drifted protocol-to-release mapping fails there rather than silently gating on the wrong thing.
 
+Parts B and C now also follow every production CLI call with a focus checkpoint that the production code cannot outrun, beside the concurrent samplers.
+The fallback's wrong-focus window lasts only a few CLI round trips, so a sampler stalled by the scheduler for that long observed nothing; the checkpoint after the explicit close observes the moved focus on every run.
+The same guarded command ran on 2026-09-24 against the CI pin, Herdr 0.7.4 protocol 16, on Linux aarch64 (Ubuntu 24.04.4 in a container, with `bin/fm-install-herdr.sh` and a headless default session as the required lane uses):
+
+```text
+ok - old path: the explicit last-pane close of a non-focused workspace stole focus (w3	w3:t1 -> w2	w2:t1)
+ok - mitigation: every production-call checkpoint and in-operation sample preserved exact focus while the doomed workspace was removed
+ok - mitigation: no explicit close and no corrective focus were needed on the defective release
+ok - fallback: a doomed pane holding a persistent child exhausts the proof and takes the plain explicit close
+ok - fallback on a defective release: a bounded wrong-focus window of 13 observations opened at the explicit close and was fully restored to the anchor
+ok - version floor: herdr 0.7.4 protocol 16 remains conservatively below the floor with steal_live=1
+ok - version floor: an unconfigured home falls back flat on herdr 0.7.4 and the explicit opt-in still projects
+evidence: herdr=0.7.4 protocol=16 steal_live=1 floor_verdict=1 default-session-tripwire=armed
+```
+
+Sixty consecutive 0.7.4 runs passed, thirty of them beside sixteen CPU-bound processes, reporting 11 to 17 observations.
+On the same day Herdr 0.9.1 protocol 22 passed ten consecutive Linux runs and a macOS aarch64 run with `steal_live=0 floor_verdict=0 default-session-tripwire=armed` and `ok - fallback on a focus-preserving release: the plain explicit close preserved exact focus throughout`.
+
 ### Attached foreground viewer
 
 A pseudo-terminal registers as a Herdr foreground client only when its window grid is non-zero.
