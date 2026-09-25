@@ -52,6 +52,12 @@
 #     ends that routing. A captain-held transfer is not rechecked at all while
 #     the away-posture record (state/.afk-contract) exists: nobody is there to
 #     answer it, and the return brief lists it.
+#     A delivered ship whose merge poll is armed, validated, and non-terminal
+#     is the same kind of external wait: housekeeping does not emit a possible
+#     wedge, an enriched wedge reason does not force-escalate, and a stale
+#     marker that started aging before the done line is cleared once that wait
+#     holds. bin/fm-pr-lib.sh's fm_pr_merge_wait_armed owns the poll predicate.
+#     A missing, retired, or invalid poll still escalates.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -182,6 +188,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
+# The armed-merge-poll predicate the watcher already uses. One owner, so the
+# away-mode wedge paths cannot drift from the normal watcher's poll proof.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$FM_DAEMON_DIR/fm-pr-lib.sh"
 # The away-posture record owner: while state/.afk-contract exists an item held
 # for the captain is never rechecked (the watcher applies the same rule).
 # shellcheck source=bin/fm-afk-contract.sh
@@ -1036,6 +1046,20 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
   fi
 }
 
+# 0 when <window> is a delivered ship waiting on an armed, validated,
+# non-terminal merge poll. fm_pr_merge_wait_armed owns that poll predicate.
+# A secondmate or scout, a last line that is not done, or any poll that
+# predicate refuses returns 1, and ordinary wedge handling stays in force.
+delivered_ship_merge_wait() {  # <window> <state>
+  local win=$1 state=$2 task last
+  task=$(window_to_task "$win" "$state")
+  [ -n "$task" ] || return 1
+  [ "$(_fm_status_kind "$state/$task.status")" = ship ] || return 1
+  last=$(last_status_line "$state/$task.status")
+  [ "$(status_line_verb "$last")" = "done" ] || return 1
+  fm_pr_merge_wait_armed "$state" "$task" "$FM_DAEMON_DIR/fm-pr-poll.sh"
+}
+
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
 # Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
@@ -1045,6 +1069,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
+#     A delivered ship on an armed merge poll is cleared without a wedge,
+#     including a marker that started aging before its done line.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
 #     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
 #     -> escalate a recheck digest naming which human the wait is on, and reset
@@ -1101,6 +1127,14 @@ housekeeping() {  # <state>
     last=$(last_status_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
+      continue
+    fi
+    # Waiting on an armed merge poll is an external wait. Drop the marker now,
+    # even when it started aging before the done line and is already past the
+    # wedge threshold, so it cannot become a possible wedge on this tick or a
+    # later one.
+    if delivered_ship_merge_wait "$win" "$state"; then
+      stale_marker_remove "$win" "$state"
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
@@ -1454,13 +1488,21 @@ handle_wake() {  # <reason> <state>
               # once per STALE_ESCALATE_SECS for as long as the wait lasted.
               # Housekeeping (2b) then owns the re-surface, so the wait is still
               # bounded - by one recheck per PAUSE_RESURFACE_SECS instead.
+              # A delivered ship waiting on an armed merge poll is the same
+              # kind of external wait: the wedge wording must not replace the
+              # classifier verdict, and the marker must stop aging.
               case "${decision%%|*}" in
                 pause) : ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(last_status_line "$state/$task.status")
-                       status_is_paused_or_captain_held "$last" \
-                         || decision="escalate|${reason#stale: }"
+                       if status_is_paused_or_captain_held "$last"; then
+                         :
+                       elif delivered_ship_merge_wait "$arg" "$state"; then
+                         stale_marker_remove "$arg" "$state"
+                       else
+                         decision="escalate|${reason#stale: }"
+                       fi
                        ;;
                    esac ;;
               esac ;;
@@ -1470,7 +1512,9 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
-  [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
+  if [ "$kind" = signal ]; then
+    sync_pause_markers_from_signal "$state" "$arg"
+  fi
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
     last=$(last_status_line "$state/$task.status")
