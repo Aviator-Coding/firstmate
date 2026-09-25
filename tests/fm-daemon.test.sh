@@ -3060,8 +3060,9 @@ EOF
     || fail "[signal] housekeeping wedge-escalated the armed merge wait: $(cat "$state/.subsuper-escalations")"
 
   # The poll is already armed when the done line arrives. The signal itself
-  # must stop the marker that started aging before that line, without waiting
-  # for the next housekeeping tick and without dropping the done escalation.
+  # must escalate the done line without ever reporting it as a possible
+  # wedge; the marker that started aging before that line stops on the next
+  # housekeeping tick, the same as any other armed merge wait.
   dir=$(daemon_prwait_home armed-signal armed "done" 500 0) \
     || fail "[armed-signal] could not build the already-armed fixture"
   state="$dir/state"
@@ -3069,13 +3070,17 @@ EOF
   key=$(printf '%s' "$task" | tr ':/.' '___')
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" \
     handle_wake "signal: $state/$task.status" "$state"
-  [ ! -e "$state/.subsuper-stale-$key" ] \
-    || fail "[armed-signal] the done signal left the pre-done marker running on an already-armed poll"
   wedges=$(grep -c 'possible wedge' "$state/.subsuper-escalations" || true)
   [ "$wedges" = 0 ] \
     || fail "[armed-signal] the done signal was reported as a possible wedge: $(cat "$state/.subsuper-escalations")"
   grep -F "$DAEMON_PRWAIT_URL" "$state/.subsuper-escalations" >/dev/null \
     || fail "[armed-signal] the done signal was not escalated"
+  daemon_prwait_housekeeping "$dir"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "[armed-signal] housekeeping left the pre-done marker running on an already-armed poll"
+  wedges=$(grep -c 'possible wedge' "$state/.subsuper-escalations" || true)
+  [ "$wedges" = 0 ] \
+    || fail "[armed-signal] housekeeping wedge-escalated the armed merge wait: $(cat "$state/.subsuper-escalations")"
 
   pass "an armed merge poll is not an away-mode wedge, and a missing, retired, or invalid poll still is"
 }

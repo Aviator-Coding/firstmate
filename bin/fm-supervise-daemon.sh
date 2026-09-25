@@ -1060,24 +1060,6 @@ delivered_ship_merge_wait() {  # <window> <state>
   fm_pr_merge_wait_armed "$state" "$task" "$FM_DAEMON_DIR/fm-pr-poll.sh"
 }
 
-# A done signal whose merge poll is already armed ends wedge aging now,
-# including a marker that started before that line. The signal itself still
-# escalates; this only stops the later possible-wedge path.
-clear_merge_wait_stale_markers() {  # <state> <signal-files>
-  local state=$1 paths=$2 f task win
-  local -a files
-  read -r -a files <<<"$paths"
-  for f in "${files[@]}"; do
-    case "$f" in *.status) ;; *) continue ;; esac
-    [ -e "$f" ] || continue
-    task=$(basename "$f"); task=${task%.status}
-    win=$(window_for_task "$(_stale_key "$task")" "$state" 2>/dev/null || true)
-    [ -n "$win" ] || continue
-    delivered_ship_merge_wait "$win" "$state" || continue
-    stale_marker_remove "$win" "$state"
-  done
-}
-
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
 # Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
@@ -1532,7 +1514,6 @@ handle_wake() {  # <reason> <state>
   distilled=${decision#*|}
   if [ "$kind" = signal ]; then
     sync_pause_markers_from_signal "$state" "$arg"
-    clear_merge_wait_stale_markers "$state" "$arg"
   fi
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
