@@ -799,6 +799,49 @@ test_premature_done_annotation_tagged() {
   pass "drain annotation tags a URL-less PR-mode done: as premature and leaves delivered ones alone"
 }
 
+# The reported post-merge case: a later URL-less verification done: is not
+# tagged once the merge-notification marker records that PR as merged. The
+# same line on a task whose pr= is only armed stays tagged.
+test_post_merge_url_less_done_annotation_not_tagged() {
+  local dir state out
+  dir=$(make_case post-merge-done)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf '%s\n' \
+    'window=test:postmerge' \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'pr=https://github.com/Aviator-Coding/home-ops/pull/1754' \
+    > "$state/postmerge.meta"
+  printf '%s\n' \
+    'done [at=1750000001]: PR https://github.com/Aviator-Coding/home-ops/pull/1754 checks green' \
+    'done [at=1750000099]: post-merge verification passed, retained memory flat' \
+    > "$state/postmerge.status"
+  printf '%s\n' \
+    'window=test:armed' \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'pr=https://github.com/Aviator-Coding/home-ops/pull/1754' \
+    > "$state/armed.meta"
+  printf 'done [at=1750000099]: post-merge verification passed, retained memory flat\n' \
+    > "$state/armed.status"
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$ROOT/bin/fm-pr-lib.sh"
+  fm_pr_poll_merge_mark_notified "$state" postmerge github github.com Aviator-Coding/home-ops 1754 \
+    || fail "could not record the merged PR through its owner"
+  append_wake "$state" signal postmerge.status "signal: postmerge" || fail "postmerge wake append failed"
+  append_wake "$state" signal armed.status "signal: armed" || fail "armed wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "drain failed"
+  if grep 'postmerge.status:' "$out" | grep -F 'premature done' >/dev/null; then
+    fail "a post-merge URL-less done: was tagged premature"
+  fi
+  grep 'postmerge.status:' "$out" | grep -F 'post-merge verification passed, retained memory flat' >/dev/null \
+    || fail "the post-merge verification line was not annotated"
+  grep -F 'armed.status: [premature done: mode=no-mistakes requires the PR URL in done:' "$out" >/dev/null \
+    || fail "an armed-but-not-merged URL-less done: was not tagged premature"
+  pass "drain annotation does not tag a URL-less done: once the PR is recorded merged, and still tags one while the poll is only armed"
+}
+
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   local dir state out i raw_count expected
   dir=$(make_case complete-enrichment)
@@ -2063,6 +2106,7 @@ test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_premature_done_annotation_tagged
+test_post_merge_url_less_done_annotation_not_tagged
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row

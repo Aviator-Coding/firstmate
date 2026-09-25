@@ -142,8 +142,9 @@
 #      A no-mistakes ship's ready: validation handoff reports parked: the worker
 #      stopped at a gate only firstmate's validation trigger opens. A done: that
 #      fm-classify-lib.sh's status_done_is_premature flags for the task's mode
-#      (a no-mistakes or direct-PR done: without its PR URL) reports blocked with
-#      a "premature done" detail, never done: it needs a steer, not delivery.
+#      (a no-mistakes or direct-PR done: without its PR URL, while that PR is
+#      not recorded merged) reports blocked with a "premature done" detail,
+#      never done: it needs a steer, not delivery.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -240,7 +241,7 @@ map_log_state() {  # <line>
     echo paused
     return
   fi
-  if status_done_is_premature "$1" "$MODE"; then
+  if status_done_is_premature "$1" "$MODE" "$STATE" "$ID"; then
     echo blocked
     return
   fi
@@ -592,7 +593,7 @@ EOF
 }
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
-  ! status_done_is_premature "$LOG_LINE" "$MODE" || return 1
+  ! status_done_is_premature "$LOG_LINE" "$MODE" "$STATE" "$ID" || return 1
   case "$(status_line_note "$LOG_LINE")" in
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
     *) return 1 ;;
@@ -1269,7 +1270,7 @@ if [ -n "$LOG_VERB" ]; then
   if [ "$LOG_STATE" != unknown ]; then
     if [ "$LOG_STATE" = working ] && [ "${BUSY_VERDICT%% *}" = idle ]; then
       emit unknown status-log "${LOG_LINE}${SEP}harness idle (${BUSY_VERDICT#* })"
-    elif status_done_is_premature "$LOG_LINE" "$MODE"; then
+    elif status_done_is_premature "$LOG_LINE" "$MODE" "$STATE" "$ID"; then
       emit "$LOG_STATE" status-log "premature done: mode=$MODE requires the PR URL in done:, steer the worker to finish delivery${SEP}$(status_line_note "$LOG_LINE")"
     else
       emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"

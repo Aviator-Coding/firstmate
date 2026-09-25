@@ -2390,6 +2390,7 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # When the caller also sourced fm-classify-lib.sh, an event that its
 # status_done_is_premature flags for the task's recorded delivery mode is tagged
 # ahead of the event text, so firstmate reads a steer rather than a delivery.
+# The task's state directory and id are passed so a recorded merge is visible.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
   local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
@@ -2472,7 +2473,7 @@ EOF
         prefix="$prefix; historical / not necessarily the triggering event"
       fi
       tag=''
-      if [ -n "$task_mode" ] && status_done_is_premature "$event_line" "$task_mode"; then
+      if [ -n "$task_mode" ] && status_done_is_premature "$event_line" "$task_mode" "$STATE" "${status_key%.status}"; then
         tag="[premature done: mode=$task_mode requires the PR URL in done:, steer the worker to finish delivery] "
       fi
       line="$prefix: $status_key: $tag$event_line"
