@@ -64,15 +64,6 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
-# Merge-recorded reads go through bin/fm-pr-lib.sh. Source it once: a second
-# source resets that library's identity globals under a caller that already
-# holds them.
-if ! declare -F fm_pr_poll_merge_already_notified >/dev/null 2>&1; then
-  # shellcheck source=bin/fm-pr-lib.sh
-  # shellcheck disable=SC1091
-  . "$_FM_CLASSIFY_LIB_DIR/fm-pr-lib.sh"
-fi
-
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -250,8 +241,16 @@ status_is_captain_relevant() {
 # marker is what still says the merge was recorded. The identity parse runs in
 # a subshell so it cannot clobber the caller's PR globals. Returns 1 when the
 # record is absent, mismatched, or unreadable.
+# bin/fm-pr-lib.sh is a soft dependency: a caller that wants this check to see
+# a real merge must source it itself (bin/fm-crew-state.sh and
+# bin/fm-wake-drain.sh do). This library does not source it - fm-pr-lib.sh is
+# large and this library is sourced by many small, sometimes deliberately
+# partial, callers (vendored bin/ subsets in fault-injection tests, remote
+# worker payloads) that must not gain a hard dependency on it, and ShellCheck's
+# full-rigor lint would otherwise re-walk it through every one of them.
 _fm_task_pr_recorded_merged() {  # <state-dir> <task-id>
   local state=$1 id=$2 marker
+  declare -F fm_pr_poll_merge_already_notified >/dev/null 2>&1 || return 1
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   marker="$state/$id.pr-poll-merge-notified"

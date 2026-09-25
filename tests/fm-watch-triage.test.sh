@@ -21,6 +21,13 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# status_done_is_premature's optional merge-recorded check
+# (_fm_task_pr_recorded_merged) is a soft dependency on bin/fm-pr-lib.sh: this
+# test drives that check directly (and calls fm_pr_poll_merge_mark_notified
+# itself), so it sources the real caller's dependency rather than relying on
+# fm-classify-lib.sh to pull it in.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
