@@ -5068,6 +5068,8 @@ cmd=${1:-}; sub=${2:-}
 case "$cmd $sub" in
   "status --json")
     printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n' ;;
+  "api schema")
+    cat "${FM_FAKE_SCHEMA_FILE:?}" ;;
   "session list")
     printf '{"sessions":[{"name":"%s","running":true,"default":false,"socket_path":"%s"}]}\n' \
       "${FM_FAKE_SESSION_NAME:-default}" "${FM_FAKE_SOCKET:-/tmp/fm-fake.sock}" ;;
@@ -5217,6 +5219,52 @@ test_wait_transition_not_capable_returns_2() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
   [ "$rc" = 2 ] || fail "wait_transition must return 2 when events are below capability (fail closed to poll), got $rc"
   pass "fm_backend_herdr_wait_transition: below-capability protocol/schema falls back to polling (rc 2)"
+}
+
+# The real schema is a pretty-printed ~235KB document of ~9000 lines, larger
+# than any pipe buffer, so a line reader that stops at the first matching line
+# closes the pipe while the writer still holds most of it. The probe must
+# answer from the whole schema without that write: quietly where SIGPIPE is
+# ignored (the GitHub Actions runner) and exactly under a caller's pipefail.
+test_events_capable_large_schema_is_quiet_and_exact() {
+  local dir fb schema pad rc err variant mode
+  dir="$TMP_ROOT/events-capable"; mkdir -p "$dir"
+  fb=$(make_herdr_eventfake "$dir")
+  pad="$dir/schema-pad"
+  awk 'BEGIN { for (i = 0; i < 9000; i++) printf "    \"padding_%05d\": \"0123456789\",\n", i }' > "$pad"
+  for variant in capable incapable; do
+    schema="$dir/schema-$variant.json"
+    {
+      printf '{\n  "methods": ["events.subscribe"],\n'
+      if [ "$variant" = capable ]; then
+        printf '  "events": ["pane.agent_status_changed"],\n'
+      else
+        printf '  "events": ["pane.output_changed"],\n'
+      fi
+      cat "$pad"
+      printf '  "end": true\n}\n'
+    } > "$schema"
+    for mode in sigpipe-ignored pipefail; do
+      err="$dir/err-$variant-$mode"
+      rc=0
+      PATH="$fb:$PATH" FM_FAKE_SCHEMA_FILE="$schema" FM_BACKEND_HERDR_EVENT_READER="$dir/reader" \
+        bash -c '
+          case "$1" in
+            sigpipe-ignored) trap "" PIPE ;;
+            pipefail) set -o pipefail ;;
+          esac
+          . "$0/bin/backends/herdr.sh"
+          fm_backend_herdr_events_capable sess
+        ' "$ROOT" "$mode" 2>"$err" || rc=$?
+      [ ! -s "$err" ] || fail "events_capable ($variant, $mode) must not write to stderr: $(head -c 300 "$err")"
+      if [ "$variant" = capable ]; then
+        [ "$rc" = 0 ] || fail "events_capable must accept a large schema carrying both events markers ($mode), got rc $rc"
+      else
+        [ "$rc" = 1 ] || fail "events_capable must reject a large schema missing pane.agent_status_changed ($mode), got rc $rc"
+      fi
+    done
+  done
+  pass "fm_backend_herdr_events_capable: a pipe-buffer-sized schema is matched quietly and exactly, with SIGPIPE ignored or under pipefail"
 }
 
 test_wait_transition_reconcile_blocked_returns_record() {
@@ -5555,6 +5603,7 @@ test_clear_transition_removes_task_marker
 test_apply_transition_defer_and_fallback_are_noops
 test_wait_transition_no_panes_returns_2
 test_wait_transition_not_capable_returns_2
+test_events_capable_large_schema_is_quiet_and_exact
 test_wait_transition_reconcile_blocked_returns_record
 test_wait_transition_subscribes_before_reconcile
 test_wait_transition_reconcile_dedupes_when_marked
