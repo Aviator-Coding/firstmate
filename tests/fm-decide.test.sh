@@ -141,6 +141,7 @@ run() {
   printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
 }
 
+code='' out='' err=''
 OPTS=(--question "Which cache backend should the pager use?"
   --option "memory=Keep entries in an in-process map"
   --option "disk=Persist entries to a local file"
@@ -255,7 +256,7 @@ reset_rec
 env -u JEV_DECIDE_BASE_URL JEV_DECIDE_API_KEY=$KEY PATH="$FAKEBIN:$PATH" "$CLI" "${OPTS[@]}" > "$TMP_ROOT/out" 2>&1
 expect_code 0 "$?" "missing base URL exits 0"
 assert_grep "reason: not configured: JEV_DECIDE_BASE_URL is unset" "$TMP_ROOT/out" "missing base URL is named"
-env -u JEV_DECIDE_API_KEY JEV_DECIDE_BASE_URL=$BASE PATH="$FAKEBIN:$PATH" "$CLI" "${OPTS[@]}" --json > "$TMP_ROOT/out" 2>&1
+env -u JEV_DECIDE_API_KEY JEV_DECIDE_BASE_URL="$BASE" PATH="$FAKEBIN:$PATH" "$CLI" "${OPTS[@]}" --json > "$TMP_ROOT/out" 2>&1
 expect_code 0 "$?" "missing key exits 0"
 jq -e '.verdict == "inconclusive" and .reason == "not configured: JEV_DECIDE_API_KEY is unset"' "$TMP_ROOT/out" >/dev/null \
   || fail "missing key is not an inconclusive json verdict: $(cat "$TMP_ROOT/out")"
