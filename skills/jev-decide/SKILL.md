@@ -42,6 +42,13 @@ Do not consult Jev on these at all, so its answer cannot anchor the question you
    Write the question as one instruction ("Which cache backend should the pager use?").
    Give each option a short label and a one-sentence description of what choosing it means.
    Add context: the relevant facts, constraints, and the user's stated goals, in plain prose.
+   State the user's priorities in their own words, as they actually said them.
+   State what each option really costs, whether it is reversible, and who is affected.
+   Give every option its upside and its downside, worded in the same neutral way.
+   Do not word anything to lean toward the answer you already expect.
+   If you cannot state the user's priorities from what they actually said, stop and ask your user instead of Jev.
+   Thin context gets a thin answer: a question asked with no priorities, no cost of waiting, no key owner, and uneven option wording came back inconclusive at confidence 0.23 leaning "wait", while the same question with those facts came back decided "open" at 0.95.
+   Keep the fuller version honest: phrases like "easy to tighten later" push toward an option, so state facts, not persuasion.
    Everything you send leaves your machine through the proxy to a third-party model, so never include secrets, credentials, private keys, or personal data in the question, options, or context.
 2. **Ask.**
    Run `scripts/jev-decide.sh --question "<question>" --option "<label>=<description>" --option "<label>=<description>" --context "<context>"` from this skill's directory (add more `--option` flags as needed, `--context-file <path>` for long context, `--json` for machine output).
