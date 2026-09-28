@@ -24,7 +24,8 @@
 # on context:
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
 #     merge-base against origin/main (or local main) can be found, it lints
-#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh, with
+#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh plus the
+#     shipped skill CLIs skills/*/scripts/*.sh, with
 #     --external-sources and full dataflow. This is what CI always runs, so
 #     CI coverage never depends on a local diff.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
@@ -500,8 +501,9 @@ fm_lint_changed_base_ref() {
 }
 
 # fm_lint_is_canonical_root tests membership in the canonical set (a direct
-# *.sh child of bin/, bin/backends/, or tests/) without the shell case
-# statement's non-pathname wildcard matching a path separator by accident.
+# *.sh child of bin/, bin/backends/, tests/, or one skills/<name>/scripts/)
+# without the shell case statement's non-pathname wildcard matching a path
+# separator by accident.
 fm_lint_is_canonical_root() {
   local path=$1 dir base
   case "$path" in
@@ -514,6 +516,14 @@ fm_lint_is_canonical_root() {
   esac
   case "$dir" in
     bin|bin/backends|tests) return 0 ;;
+    skills/*/scripts)
+      dir=${dir#skills/}
+      dir=${dir%/scripts}
+      case "$dir" in
+        ''|*/*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
 }
@@ -539,6 +549,9 @@ else
 
   if [ "$full_lint" -eq 1 ]; then
     ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+    for skill_script in skills/*/scripts/*.sh; do
+      [ -f "$skill_script" ] && ROOTS+=("$skill_script")
+    done
   else
     CHANGED_MODE=1
     ROOTS=()
