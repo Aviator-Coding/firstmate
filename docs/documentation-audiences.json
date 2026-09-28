@@ -509,6 +509,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "skills/jev-decide/SKILL.md",
+      "audience": "public-product"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     },

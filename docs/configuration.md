@@ -560,6 +560,14 @@ The resolver sends the key to `curl` only as a header read from a file descripto
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Jev decisions (.env JEV_DECIDE_*)
+
+`bin/fm-decide.sh` is firstmate's entry point to the public [`jev-decide`](../skills/jev-decide/SKILL.md) skill, which asks TypeSafe Jev to pick one option for a decision through the home's LiteLLM proxy and reports `decided` or `inconclusive`.
+Each `JEV_DECIDE_*` variable the skill's CLI reads comes from the calling environment when non-empty, else from a matching line in the home's gitignored `.env`, read with the same `bin/fm-env-lib.sh` accessor and environment-wins rule as `TYPESAFE_API_KEY` and the Relay token.
+Set at least `JEV_DECIDE_BASE_URL` (the proxy base URL) and `JEV_DECIDE_API_KEY` (a proxy key allowed on the decisions route); without either, every call is `inconclusive` with a "not configured" reason, exit 0, and no network call, so the decision goes to the captain.
+[`skills/jev-decide/scripts/jev-decide.sh`](../skills/jev-decide/scripts/jev-decide.sh) `--help` owns the flags, the optional path, model, confidence floor, top-two margin, and timeout variables with their defaults, the verdict rule, and the output format; the skill owns when to ask and what a verdict authorizes, and `AGENTS.md` section 9 owns firstmate's use of it.
+The key reaches the CLI only through its environment, the CLI unsets it before starting any child, `curl` reads it as a header from a file descriptor rather than argv, and error text is redacted of the key before printing.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -1171,6 +1179,8 @@ FMX_ENV_FILE=           # optional alternate .env file for direct Relay client i
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+JEV_DECIDE_BASE_URL=    # Jev decisions proxy base URL, from the environment or .env; with JEV_DECIDE_API_KEY, absent means bin/fm-decide.sh is always inconclusive (docs/configuration.md "Jev decisions")
+JEV_DECIDE_API_KEY=     # Jev decisions proxy key; other JEV_DECIDE_* tuning variables are listed by skills/jev-decide/scripts/jev-decide.sh --help
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
