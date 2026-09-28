@@ -28,7 +28,9 @@
 #                 probability beats the runner-up by at least the margin
 #   inconclusive  anything else: confidence below the floor, top two options
 #                 within the margin, a choice that disagrees with its own
-#                 probabilities, a malformed answer, an HTTP or network error,
+#                 probabilities, a malformed answer, an HTTP or network error
+#                 (401 reads "credential rejected", 403 "credential not
+#                 granted" - the key is valid but not allowed on this route),
 #                 a timeout, a missing tool, or missing configuration
 #   Every verdict exits 0. Exit 2 is reserved for a usage error or an invalid
 #   tuning value (a bad flag, fewer than two options, a malformed or duplicate
@@ -220,8 +222,12 @@ if [ "$CURL_RC" -eq 28 ]; then
 elif [ "$CURL_RC" -ne 0 ]; then
   inconclusive_bare "request failed (curl exit $CURL_RC): $(redact "$(head -c 200 "$ERR_FILE")")"
 fi
-[ "${HTTP:-000}" = 200 ] \
-  || inconclusive_bare "http ${HTTP:-000} after ${LAT_MS} ms: $(redact "$(head -c 200 "$RESP_FILE")")"
+case "${HTTP:-000}" in
+  200) : ;;
+  401) inconclusive_bare "credential rejected: http 401 after ${LAT_MS} ms: $(redact "$(head -c 200 "$RESP_FILE")")" ;;
+  403) inconclusive_bare "credential not granted: http 403 after ${LAT_MS} ms: $(redact "$(head -c 200 "$RESP_FILE")")" ;;
+  *) inconclusive_bare "http ${HTTP:-000} after ${LAT_MS} ms: $(redact "$(head -c 200 "$RESP_FILE")")" ;;
+esac
 
 LABELS_JSON=$(printf '%s\n' "${LABELS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | sort')
 jq -e --argjson labels "$LABELS_JSON" '

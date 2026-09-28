@@ -77,6 +77,9 @@ class Handler(BaseHTTPRequestHandler):
             answer = {"choice": labels[1], "probabilities": probs(labels, 0.9, 0.06), "confidence": 0.9}
         elif mode == "wrong-labels":
             answer = {"choice": "other", "probabilities": {"other": 1.0}, "confidence": 0.9}
+        elif mode in ("forbidden", "unauthorized"):
+            status = 403 if mode == "forbidden" else 401
+            payload = {"error": {"message": "Key/team not allowed to access passthrough route", "code": str(status)}}
         elif mode == "slow":
             time.sleep(4)
             answer = {"choice": labels[0], "probabilities": probs(labels, 0.9, 0.06), "confidence": 0.86}
@@ -237,6 +240,16 @@ JEV_DECIDE_BASE_URL=$BASE JEV_DECIDE_API_KEY=$KEY run code out err "$CLI" "${OPT
 jq -e '.verdict == "inconclusive" and .choice == null and .leaning == null and (.reason | startswith("http 500"))' <<<"$out" >/dev/null \
   || fail "json http error is not inconclusive: $out"
 pass "an HTTP error is inconclusive and redacts any echoed key"
+
+printf 'forbidden\n' > "$MODE"
+JEV_DECIDE_BASE_URL=$BASE JEV_DECIDE_API_KEY=$KEY run code out err "$CLI" "${OPTS[@]}"
+expect_code 0 "$code" "http 403 exits 0"
+assert_contains "$out" "verdict: inconclusive" "http 403 is inconclusive"
+assert_contains "$out" "reason: credential not granted: http 403 after" "http 403 names an ungranted credential"
+printf 'unauthorized\n' > "$MODE"
+JEV_DECIDE_BASE_URL=$BASE JEV_DECIDE_API_KEY=$KEY run code out err "$CLI" "${OPTS[@]}"
+assert_contains "$out" "reason: credential rejected: http 401 after" "http 401 names a rejected credential"
+pass "an ungranted or rejected credential is inconclusive with a clear reason"
 
 printf 'slow\n' > "$MODE"
 JEV_DECIDE_BASE_URL=$BASE JEV_DECIDE_API_KEY=$KEY JEV_DECIDE_TIMEOUT=1 run code out err "$CLI" "${OPTS[@]}"

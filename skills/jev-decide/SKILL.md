@@ -63,3 +63,4 @@ The CLI needs `bash`, `curl`, and `jq`, plus two environment variables:
 The default path is `/openrouter/alpha/decisions`, LiteLLM's built-in OpenRouter pass-through, which forwards to OpenRouter's decisions API (Jev is served only there, not on chat completions).
 If your proxy exposes a different door, set `JEV_DECIDE_PATH`; to call OpenRouter directly, use base `https://openrouter.ai/api` with path `/alpha/decisions` and an OpenRouter key.
 Without a base URL or key, every call returns `inconclusive` with a "not configured" reason, so an unconfigured install safely routes every decision to your user.
+A "credential not granted" reason (HTTP 403) means the key is valid but the proxy has not allowed it on the decisions route; ask the proxy's operator to grant it.
